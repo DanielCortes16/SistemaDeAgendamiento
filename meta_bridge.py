@@ -10,7 +10,7 @@ import io
 import zipfile
 import xml.sax.saxutils
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pg8000.native
 
 
@@ -225,6 +225,39 @@ def send_waha_text(phone, text):
         return False, str(e)
 
 
+def send_waha_poll(phone, poll_name, options):
+    try:
+        clean_digits = "".join(c for c in phone if c.isdigit())
+        chat_id = f"{clean_digits}@c.us"
+        # WhatsApp limit is 255 characters for poll title
+        if len(poll_name) > 250:
+            poll_name = poll_name[:247] + "..."
+        payload = {
+            "session": "default",
+            "chatId": chat_id,
+            "poll": {
+                "name": poll_name,
+                "options": options,
+                "multipleAnswers": False
+            }
+        }
+        req = urllib.request.Request(
+            f"{WAHA_BASE_URL}/api/sendPoll",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-Api-Key": WAHA_API_KEY,
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            print(f"[WAHA Poll Sent] to {phone} ({chat_id}): {poll_name[:60]}...", flush=True)
+            return True, resp.read().decode("utf-8")
+    except Exception as e:
+        print(f"[WAHA Poll Error] to {phone}: {e}", flush=True)
+        return False, str(e)
+
+
 def fetch_tecnicos_and_citas(filters=None):
     if filters is None:
         filters = {}
@@ -282,7 +315,10 @@ def fetch_tecnicos_and_citas(filters=None):
             "TO_CHAR(c.fecha_fin AT TIME ZONE 'America/Bogota', 'YYYY-MM-DD HH24:MI') AS f_fin, "
             "c.estado, c.confirmacion_cliente, c.confirmacion_tecnico, "
             "cli.nombre, cli.telefono_whatsapp, tec.nombre, tec.telefono_whatsapp, "
-            "c.direccion_servicio, c.descripcion, c.microsoft_event_id "
+            "c.direccion_servicio, c.descripcion, c.microsoft_event_id, "
+            "TO_CHAR(c.fecha_inicio_real AT TIME ZONE 'America/Bogota', 'YYYY-MM-DD HH24:MI') AS f_ini_real, "
+            "TO_CHAR(c.fecha_fin_real AT TIME ZONE 'America/Bogota', 'YYYY-MM-DD HH24:MI') AS f_fin_real, "
+            "c.calificacion, c.fecha_inicio_real, c.fecha_fin_real "
             "FROM citas c "
             "JOIN usuarios cli ON c.cliente_id = cli.id "
             "JOIN usuarios tec ON c.tecnico_id = tec.id "
@@ -291,6 +327,21 @@ def fetch_tecnicos_and_citas(filters=None):
         )
         rows_citas = con.run(sql_citas, **params)
         for r in rows_citas:
+            f_ini_real = r[14]
+            f_fin_real = r[15]
+            calificacion = r[16]
+            dt_ini_real = r[17]
+            dt_fin_real = r[18]
+
+            duracion_real = "-"
+            if dt_ini_real and dt_fin_real:
+                total_secs = max(0, int((dt_fin_real - dt_ini_real).total_seconds()))
+                hrs = total_secs // 3600
+                mins = (total_secs % 3600) // 60
+                duracion_real = f"{hrs}h {mins}m" if hrs > 0 else f"{mins} min"
+            elif dt_ini_real:
+                duracion_real = "En progreso"
+
             citas.append({
                 "id": str(r[0]),
                 "titulo": r[1],
@@ -306,6 +357,10 @@ def fetch_tecnicos_and_citas(filters=None):
                 "direccion": r[11],
                 "descripcion": r[12] or "",
                 "microsoft_event_id": r[13] or "",
+                "f_ini_real": f_ini_real or "",
+                "f_fin_real": f_fin_real or "",
+                "duracion_real": duracion_real,
+                "calificacion": calificacion,
             })
         con.close()
     except Exception as e:
@@ -685,7 +740,7 @@ def render_agendar_page(success_data=None, error_msg=None, info_msg=None, filter
         cli_datalist_options += f'<option value="{html.escape(c_nom)}"></option>\n'
 
     est_filter_options = '<option value="">-- Todos los estados --</option>\n'
-    for est in ["PENDIENTE", "CONFIRMADA", "CANCELADA", "REQUIERE_REASIGNACION"]:
+    for est in ["PENDIENTE", "CONFIRMADA", "EN_PROGRESO", "COMPLETADA", "CANCELADA", "REQUIERE_REASIGNACION"]:
         sel = 'selected' if est == filters.get('estado', '') else ''
         est_filter_options += f'<option value="{est}" {sel}>{est}</option>\n'
 
@@ -703,6 +758,10 @@ def render_agendar_page(success_data=None, error_msg=None, info_msg=None, filter
             badge_color = "#ef4444"
         elif c["estado"] == "REQUIERE_REASIGNACION":
             badge_color = "#f97316"
+        elif c["estado"] == "EN_PROGRESO":
+            badge_color = "#2563eb"
+        elif c["estado"] == "COMPLETADA":
+            badge_color = "#7c3aed"
 
         c_titulo_escaped = html.escape(c['titulo']).replace("'", "\\'")
         c_cliente_escaped = html.escape(c['cliente']).replace("'", "\\'")
@@ -717,6 +776,17 @@ def render_agendar_page(success_data=None, error_msg=None, info_msg=None, filter
                         onclick="confirmDeleteCita('{html.escape(c['id'])}', '{c_titulo_escaped}', '{c_cliente_escaped}', '{html.escape(c['fecha'])}')">
                     🗑️
                 </button>"""
+
+        exec_details = []
+        if c.get("f_ini_real"):
+            exec_details.append(f"▶️ {html.escape(c['f_ini_real'])}")
+        if c.get("duracion_real") and c["duracion_real"] != "-":
+            exec_details.append(f"⏱️ {html.escape(c['duracion_real'])}")
+        if c.get("calificacion"):
+            stars_str = "⭐" * int(c["calificacion"])
+            exec_details.append(f"<span style='color:#d97706;font-weight:700;'>{stars_str} ({c['calificacion']}/5)</span>")
+
+        exec_html = f"<div style='font-size:11px;color:#334155;margin-top:4px;'>{' • '.join(exec_details)}</div>" if exec_details else ""
 
         citas_rows_html += f"""
         <tr {row_style}>
@@ -739,6 +809,7 @@ def render_agendar_page(success_data=None, error_msg=None, info_msg=None, filter
                 <div style="font-size:11px;color:#475569;margin-top:4px;">
                     Cli: {html.escape(c['conf_cli'] or 'PENDIENTE')} | Téc: {html.escape(c['conf_tec'] or 'PENDIENTE')}
                 </div>
+                {exec_html}
             </td>
             <td style="text-align:center;">
                 {del_btn_html}
@@ -1388,6 +1459,10 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                 "ID Cita",
                 "Servicio / Labor",
                 "Fecha y Hora",
+                "Inicio Real",
+                "Fin Real",
+                "Duración Real",
+                "Calificación CSAT",
                 "Cliente",
                 "Teléfono Cliente",
                 "Técnico Asignado",
@@ -1404,6 +1479,10 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                     c["id"],
                     c["titulo"],
                     c["fecha"],
+                    c.get("f_ini_real") or "",
+                    c.get("f_fin_real") or "",
+                    c.get("duracion_real") or "",
+                    f"{c['calificacion']}/5 ⭐" if c.get("calificacion") else "",
                     c["cliente"],
                     c["cli_tel"],
                     c["tecnico"],
@@ -1630,96 +1709,353 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                 print(f"[WAHA Inbound Message] From: {sender_phone}, Body: {body_text}", flush=True)
 
             if sender_phone and body_text:
-                action = None
-                if ("✅" in body_text or "SÍ" in body_text or "CONFIRM" in body_text or 
-                    body_text in ["1", "SI", "OK", "VOY", "DE ACUERDO"]):
-                    action = "CONFIRMAR"
-                elif ("❌" in body_text or "CANCEL" in body_text or "NO DISPONIBLE" in body_text or "NO PUEDO" in body_text or
-                      body_text in ["2", "NO"]):
-                    action = "CANCELAR"
+                clean_p = "".join(c for c in sender_phone if c.isdigit())
 
-                if action:
-                    clean_p = "".join(c for c in sender_phone if c.isdigit())
+                # FLUJO 1: Técnico inicia labor (voto poll o texto)
+                if "INICIAR" in body_text or "▶️" in body_text:
                     con = get_db()
                     rows = con.run("""
                         SELECT c.id, c.titulo,
                                TO_CHAR(c.fecha_inicio AT TIME ZONE 'America/Bogota', 'YYYY-MM-DD HH24:MI') AS fecha_fmt,
-                               c.estado, c.confirmacion_cliente, c.confirmacion_tecnico,
                                cli.nombre AS cli_nom, cli.telefono_whatsapp AS cli_tel,
                                tec.nombre AS tec_nom, tec.telefono_whatsapp AS tec_tel,
                                COALESCE(adm.telefono_whatsapp, '+573118198511') AS adm_tel,
-                               CASE WHEN REGEXP_REPLACE(cli.telefono_whatsapp, '[^0-9]', '', 'g') = :p THEN 'CLIENTE' ELSE 'TECNICO' END AS rol
+                               c.direccion_servicio
                         FROM citas c
                         JOIN usuarios cli ON c.cliente_id = cli.id
                         JOIN usuarios tec ON c.tecnico_id = tec.id
                         LEFT JOIN usuarios adm ON c.admin_id = adm.id
-                        WHERE (REGEXP_REPLACE(cli.telefono_whatsapp, '[^0-9]', '', 'g') = :p 
-                            OR REGEXP_REPLACE(tec.telefono_whatsapp, '[^0-9]', '', 'g') = :p)
-                          AND c.fecha_inicio >= NOW() - INTERVAL '1 day'
-                          AND c.estado IN ('PENDIENTE', 'CONFIRMADA', 'REQUIERE_REASIGNACION')
+                        WHERE REGEXP_REPLACE(tec.telefono_whatsapp, '[^0-9]', '', 'g') = :p
+                          AND c.estado = 'CONFIRMADA'
+                          AND c.fecha_inicio_real IS NULL
                         ORDER BY c.fecha_inicio ASC
                         LIMIT 1
                     """, p=clean_p)
-
                     if rows:
-                        r = rows[0]
-                        cita_id, titulo, fecha_fmt, estado_actual, conf_cli, conf_tec, cli_nom, cli_tel, tec_nom, tec_tel, adm_tel, rol = r
-
-                        nuevo_estado = estado_actual
-                        nuevo_conf_cli = conf_cli
-                        nuevo_conf_tec = conf_tec
-                        motivo = None
-
-                        if rol == "CLIENTE":
-                            if action == "CONFIRMAR":
-                                nuevo_conf_cli = "CONFIRMADA"
-                                nuevo_estado = "CONFIRMADA" if conf_tec == "CONFIRMADA" else "PENDIENTE"
-                            else:
-                                nuevo_conf_cli = "CANCELADA"
-                                nuevo_estado = "CANCELADA"
-                                motivo = "Cancelada por el cliente vía WhatsApp"
-                        else:  # TECNICO
-                            if action == "CONFIRMAR":
-                                nuevo_conf_tec = "CONFIRMADA"
-                                nuevo_estado = "CONFIRMADA" if conf_cli == "CONFIRMADA" else "PENDIENTE"
-                            else:
-                                nuevo_conf_tec = "CANCELADA"
-                                nuevo_estado = "REQUIERE_REASIGNACION"
-                                motivo = "Técnico indicó que no está disponible vía WhatsApp"
-
+                        cita_id, titulo, fecha_fmt, cli_nom, cli_tel, tec_nom, tec_tel, adm_tel, direccion = rows[0]
                         con.run("""
                             UPDATE citas
-                            SET confirmacion_cliente = :cc,
-                                confirmacion_tecnico = :ct,
-                                estado = :est::estado_cita_enum,
-                                motivo_cancelacion = COALESCE(:mot, motivo_cancelacion),
+                            SET estado = 'EN_PROGRESO'::estado_cita_enum,
+                                fecha_inicio_real = NOW(),
                                 updated_at = NOW()
                             WHERE id = :id
-                        """, cc=nuevo_conf_cli, ct=nuevo_conf_tec, est=nuevo_estado, mot=motivo, id=cita_id)
+                        """, id=cita_id)
                         con.close()
 
-                        if action == "CONFIRMAR":
-                            reply_msg = f"🙌 ¡Muchas gracias! Tu respuesta para el servicio *{titulo}* ({fecha_fmt}) ha sido registrada exitosamente como CONFIRMADA."
-                        else:
-                            reply_msg = f"⚠️ Tu respuesta para el servicio *{titulo}* ({fecha_fmt}) ha sido registrada como CANCELADA / NO DISPONIBLE. El administrador de UT TEKVO ha sido notificado."
-                        send_waha_text(sender_phone, reply_msg)
+                        bogota_tz = timezone(timedelta(hours=-5))
+                        hora_inicio = datetime.now(bogota_tz).strftime("%I:%M %p")
 
-                        if rol == "CLIENTE" and action == "CANCELAR":
-                            tec_alert = f"⚠️ *Aviso de Cancelación*\n\nHola {tec_nom}, la cita de *{titulo}* programada para {fecha_fmt} con {cli_nom} ha sido CANCELADA por el cliente.\n\nTu agenda queda liberada en esa franja horaria."
-                            send_waha_text(tec_tel, tec_alert)
+                        # 1. Responder al técnico
+                        tec_msg = f"⏱️ *Labor Iniciada con Éxito - UT TEKVO*\n\nServicio: *{titulo}*\nHora de inicio: *{hora_inicio}*.\n¡Muchos éxitos en la labor!"
+                        send_waha_text(tec_tel, tec_msg)
 
-                        admin_alert = (
-                            f"🔔 *Actualización de Cita UT TEKVO*\n\n"
-                            f"- Cita: *{titulo}* ({fecha_fmt})\n"
-                            f"- Quien respondió: {cli_nom if rol == 'CLIENTE' else tec_nom} ({rol})\n"
-                            f"- Respuesta: {'✅ CONFIRMADO' if action == 'CONFIRMAR' else '❌ CANCELADO'}\n"
-                            f"- Estado Cita: {nuevo_estado}"
+                        # 2. Enviar encuesta interactiva para finalizar labor
+                        poll_tit = (titulo[:55] + "...") if len(titulo) > 55 else titulo
+                        fin_poll_name = f"🛠️ *UT TEKVO - Finalizar Labor*\n\nServicio en curso: *{poll_tit}*.\nPresiona al culminar:"
+                        send_waha_poll(tec_tel, fin_poll_name, ["⏹️ Finalizar Labor"])
+
+                        # 3. Notificar al cliente
+                        cli_msg = f"ℹ️ *Aviso UT TEKVO*\n\nHola {cli_nom}, tu técnico {tec_nom} ha *iniciado* la labor técnica en tu dirección para el servicio *{titulo}* ({hora_inicio})."
+                        send_waha_text(cli_tel, cli_msg)
+
+                        # 4. Notificar al administrador
+                        admin_msg = (
+                            f"⏳ *Labor en Progreso - UT TEKVO*\n\n"
+                            f"- Servicio: *{titulo}*\n"
+                            f"- Técnico: {tec_nom}\n"
+                            f"- Cliente: {cli_nom}\n"
+                            f"- Dirección: {direccion}\n"
+                            f"- Hora Inicio: {hora_inicio}\n"
+                            f"- Estado: EN_PROGRESO"
                         )
-                        send_waha_text(adm_tel, admin_alert)
-                        print(f"[Admin Alert Sent] to {adm_tel}: {admin_alert[:60]}...", flush=True)
+                        send_waha_text(adm_tel, admin_msg)
+                        print(f"[Labor Iniciada] Cita {cita_id} iniciada por {tec_nom}", flush=True)
                     else:
                         con.close()
-                        print(f"[WAHA Inbound] No pending cita found for phone {sender_phone} (clean: {clean_p})", flush=True)
+                        print(f"[Labor Iniciar] No confirmed cita found for technician phone {sender_phone} (clean: {clean_p})", flush=True)
+                        send_waha_text(sender_phone, "ℹ️ No tienes servicios en estado CONFIRMADA pendientes por iniciar.")
+
+                # FLUJO 2: Técnico finaliza labor (voto poll o texto)
+                elif any(k in body_text for k in ["FINALIZAR", "⏹️", "CULMINAR", "TERMINAR"]):
+                    con = get_db()
+                    rows = con.run("""
+                        SELECT c.id, c.titulo,
+                               TO_CHAR(c.fecha_inicio AT TIME ZONE 'America/Bogota', 'YYYY-MM-DD HH24:MI') AS fecha_fmt,
+                               cli.nombre AS cli_nom, cli.telefono_whatsapp AS cli_tel,
+                               tec.nombre AS tec_nom, tec.telefono_whatsapp AS tec_tel,
+                               COALESCE(adm.telefono_whatsapp, '+573118198511') AS adm_tel,
+                               c.direccion_servicio
+                        FROM citas c
+                        JOIN usuarios cli ON c.cliente_id = cli.id
+                        JOIN usuarios tec ON c.tecnico_id = tec.id
+                        LEFT JOIN usuarios adm ON c.admin_id = adm.id
+                        WHERE REGEXP_REPLACE(tec.telefono_whatsapp, '[^0-9]', '', 'g') = :p
+                          AND c.estado = 'EN_PROGRESO'
+                        ORDER BY c.fecha_inicio_real DESC NULLS LAST
+                        LIMIT 1
+                    """, p=clean_p)
+                    if rows:
+                        cita_id, titulo, fecha_fmt, cli_nom, cli_tel, tec_nom, tec_tel, adm_tel, direccion = rows[0]
+                        res_update = con.run("""
+                            UPDATE citas
+                            SET estado = 'COMPLETADA'::estado_cita_enum,
+                                fecha_fin_real = NOW(),
+                                updated_at = NOW()
+                            WHERE id = :id
+                            RETURNING fecha_inicio_real, fecha_fin_real
+                        """, id=cita_id)
+                        con.close()
+
+                        f_ini_dt = res_update[0][0] if res_update else None
+                        f_fin_dt = res_update[0][1] if res_update else None
+                        duracion_str = "N/A"
+                        if f_ini_dt and f_fin_dt:
+                            total_secs = max(0, int((f_fin_dt - f_ini_dt).total_seconds()))
+                            hrs = total_secs // 3600
+                            mins = (total_secs % 3600) // 60
+                            duracion_str = f"{hrs}h {mins}m" if hrs > 0 else f"{mins} min"
+
+                        # 1. Responder al técnico
+                        tec_msg = f"✅ *Labor Finalizada con Éxito - UT TEKVO*\n\nHas culminado el servicio *{titulo}*.\n⏱️ Duración total: *{duracion_str}*.\n¡Excelente trabajo!"
+                        send_waha_text(tec_tel, tec_msg)
+
+                        # 2. Notificar al administrador
+                        admin_msg = (
+                            f"🏁 *Labor Completada - UT TEKVO*\n\n"
+                            f"- Servicio: *{titulo}*\n"
+                            f"- Técnico: {tec_nom}\n"
+                            f"- Cliente: {cli_nom}\n"
+                            f"- Duración Real: *{duracion_str}*\n"
+                            f"- Estado: COMPLETADA"
+                        )
+                        send_waha_text(adm_tel, admin_msg)
+
+                        # 3. Enviar encuesta CSAT interactiva al cliente
+                        poll_tit = (titulo[:35] + "...") if len(titulo) > 35 else titulo
+                        poll_cli = (cli_nom[:25] + "...") if len(cli_nom) > 25 else cli_nom
+                        poll_tec = (tec_nom[:25] + "...") if len(tec_nom) > 25 else tec_nom
+                        csat_poll_name = f"⭐ *Calificación Servicio UT TEKVO*\n\nHola {poll_cli}, tu servicio de *{poll_tit}* ha finalizado. ¿Cómo calificarías la atención de {poll_tec}?"
+                        csat_options = [
+                            "⭐ 5 - Excelente",
+                            "⭐ 4 - Muy Bueno",
+                            "⭐ 3 - Regular",
+                            "⭐ 2 - Malo",
+                            "⭐ 1 - Muy Malo"
+                        ]
+                        send_waha_poll(cli_tel, csat_poll_name, csat_options)
+                        print(f"[Labor Finalizada] Cita {cita_id} completada por {tec_nom}, duración: {duracion_str}", flush=True)
+                    else:
+                        con.close()
+                        print(f"[Labor Finalizar] No in-progress cita found for technician phone {sender_phone} (clean: {clean_p})", flush=True)
+                        send_waha_text(sender_phone, "ℹ️ No tienes servicios en estado EN PROGRESO pendientes por finalizar.")
+
+                # FLUJO 3: Calificación CSAT (Estrellas, texto o números 3..5)
+                elif ("⭐" in body_text or any(k in body_text for k in ["EXCELENTE", "MUY BUENO", "REGULAR", "MUY MALO"]) or
+                      ("MALO" in body_text and "MUY" not in body_text) or body_text in ["3", "4", "5"]):
+                    score = None
+                    if "5" in body_text or "EXCELENTE" in body_text:
+                        score = 5
+                    elif "4" in body_text or "MUY BUENO" in body_text:
+                        score = 4
+                    elif "3" in body_text or "REGULAR" in body_text:
+                        score = 3
+                    elif "2" in body_text or ("MALO" in body_text and "MUY" not in body_text):
+                        score = 2
+                    elif "1" in body_text or "MUY MALO" in body_text:
+                        score = 1
+
+                    if score is not None:
+                        con = get_db()
+                        rows = con.run("""
+                            SELECT c.id, c.titulo,
+                                   TO_CHAR(c.fecha_inicio AT TIME ZONE 'America/Bogota', 'YYYY-MM-DD HH24:MI') AS fecha_fmt,
+                                   cli.nombre AS cli_nom, cli.telefono_whatsapp AS cli_tel,
+                                   tec.nombre AS tec_nom, tec.telefono_whatsapp AS tec_tel,
+                                   COALESCE(adm.telefono_whatsapp, '+573118198511') AS adm_tel,
+                                   c.direccion_servicio
+                            FROM citas c
+                            JOIN usuarios cli ON c.cliente_id = cli.id
+                            JOIN usuarios tec ON c.tecnico_id = tec.id
+                            LEFT JOIN usuarios adm ON c.admin_id = adm.id
+                            WHERE REGEXP_REPLACE(cli.telefono_whatsapp, '[^0-9]', '', 'g') = :p
+                              AND c.estado = 'COMPLETADA'
+                              AND c.calificacion IS NULL
+                            ORDER BY c.fecha_fin_real DESC NULLS LAST, c.updated_at DESC
+                            LIMIT 1
+                        """, p=clean_p)
+                        if rows:
+                            cita_id, titulo, fecha_fmt, cli_nom, cli_tel, tec_nom, tec_tel, adm_tel, direccion = rows[0]
+                            con.run("UPDATE citas SET calificacion = :score, updated_at = NOW() WHERE id = :id", score=score, id=cita_id)
+                            con.close()
+
+                            # Responder al cliente
+                            send_waha_text(cli_tel, f"🙌 ¡Muchas gracias por tu calificación de {score}/5 ⭐!\nEn UT TEKVO valoramos tu opinión para seguir brindando el mejor servicio.")
+
+                            # Notificar al técnico
+                            send_waha_text(tec_tel, f"⭐ *Calificación de Cliente - UT TEKVO*\n\nEl cliente {cli_nom} ha calificado tu servicio en *{titulo}* con *{score}/5 ⭐*.")
+
+                            # Notificar al administrador (Alerta roja si <= 2)
+                            if score <= 2:
+                                adm_alert = (
+                                    f"🚨 *ALERTA CSAT BAJO - UT TEKVO*\n\n"
+                                    f"El cliente *{cli_nom}* ({cli_tel}) calificó con *{score}/5 ⭐* el servicio *{titulo}* atendido por {tec_nom}.\n"
+                                    f"📍 Dirección: {direccion}\n"
+                                    f"👉 *Atención Inmediata:* Se sugiere contactar al cliente para seguimiento y control de calidad."
+                                )
+                            else:
+                                adm_alert = (
+                                    f"⭐ *Nueva Calificación Recibida - UT TEKVO*\n\n"
+                                    f"- Servicio: *{titulo}*\n"
+                                    f"- Cliente: {cli_nom}\n"
+                                    f"- Técnico: {tec_nom}\n"
+                                    f"- Calificación: *{score}/5 ⭐*"
+                                )
+                            send_waha_text(adm_tel, adm_alert)
+                            print(f"[CSAT Registrado] Cita {cita_id} calificada con {score}/5 por {cli_nom}", flush=True)
+                        else:
+                            con.close()
+                            print(f"[CSAT Warning] No unrated completed cita found for client {sender_phone} (clean: {clean_p})", flush=True)
+                            send_waha_text(sender_phone, "ℹ️ Gracias por responder. No tienes servicios completados pendientes por calificar.")
+
+                # FLUJO 4: Confirmación o Cancelación previa a la labor (o fallback CSAT para 1 o 2)
+                else:
+                    action = None
+                    if ("✅" in body_text or "SÍ" in body_text or "CONFIRM" in body_text or 
+                        body_text in ["1", "SI", "OK", "VOY", "DE ACUERDO"]):
+                        action = "CONFIRMAR"
+                    elif ("❌" in body_text or "CANCEL" in body_text or "NO DISPONIBLE" in body_text or "NO PUEDO" in body_text or
+                          body_text in ["2", "NO"]):
+                        action = "CANCELAR"
+
+                    if action:
+                        clean_p = "".join(c for c in sender_phone if c.isdigit())
+                        con = get_db()
+                        rows = con.run("""
+                            SELECT c.id, c.titulo,
+                                   TO_CHAR(c.fecha_inicio AT TIME ZONE 'America/Bogota', 'YYYY-MM-DD HH24:MI') AS fecha_fmt,
+                                   c.estado, c.confirmacion_cliente, c.confirmacion_tecnico,
+                                   cli.nombre AS cli_nom, cli.telefono_whatsapp AS cli_tel,
+                                   tec.nombre AS tec_nom, tec.telefono_whatsapp AS tec_tel,
+                                   COALESCE(adm.telefono_whatsapp, '+573118198511') AS adm_tel,
+                                   CASE WHEN REGEXP_REPLACE(cli.telefono_whatsapp, '[^0-9]', '', 'g') = :p THEN 'CLIENTE' ELSE 'TECNICO' END AS rol
+                            FROM citas c
+                            JOIN usuarios cli ON c.cliente_id = cli.id
+                            JOIN usuarios tec ON c.tecnico_id = tec.id
+                            LEFT JOIN usuarios adm ON c.admin_id = adm.id
+                            WHERE (REGEXP_REPLACE(cli.telefono_whatsapp, '[^0-9]', '', 'g') = :p 
+                                OR REGEXP_REPLACE(tec.telefono_whatsapp, '[^0-9]', '', 'g') = :p)
+                              AND c.fecha_inicio >= NOW() - INTERVAL '1 day'
+                              AND c.estado IN ('PENDIENTE', 'CONFIRMADA', 'REQUIERE_REASIGNACION')
+                            ORDER BY c.fecha_inicio ASC
+                            LIMIT 1
+                        """, p=clean_p)
+
+                        if rows:
+                            r = rows[0]
+                            cita_id, titulo, fecha_fmt, estado_actual, conf_cli, conf_tec, cli_nom, cli_tel, tec_nom, tec_tel, adm_tel, rol = r
+
+                            nuevo_estado = estado_actual
+                            nuevo_conf_cli = conf_cli
+                            nuevo_conf_tec = conf_tec
+                            motivo = None
+
+                            if rol == "CLIENTE":
+                                if action == "CONFIRMAR":
+                                    nuevo_conf_cli = "CONFIRMADA"
+                                    nuevo_estado = "CONFIRMADA" if conf_tec == "CONFIRMADA" else "PENDIENTE"
+                                else:
+                                    nuevo_conf_cli = "CANCELADA"
+                                    nuevo_estado = "CANCELADA"
+                                    motivo = "Cancelada por el cliente vía WhatsApp"
+                            else:  # TECNICO
+                                if action == "CONFIRMAR":
+                                    nuevo_conf_tec = "CONFIRMADA"
+                                    nuevo_estado = "CONFIRMADA" if conf_cli == "CONFIRMADA" else "PENDIENTE"
+                                else:
+                                    nuevo_conf_tec = "CANCELADA"
+                                    nuevo_estado = "REQUIERE_REASIGNACION"
+                                    motivo = "Técnico indicó que no está disponible vía WhatsApp"
+
+                            con.run("""
+                                UPDATE citas
+                                SET confirmacion_cliente = :cc,
+                                    confirmacion_tecnico = :ct,
+                                    estado = :est::estado_cita_enum,
+                                    motivo_cancelacion = COALESCE(:mot, motivo_cancelacion),
+                                    updated_at = NOW()
+                                WHERE id = :id
+                            """, cc=nuevo_conf_cli, ct=nuevo_conf_tec, est=nuevo_estado, mot=motivo, id=cita_id)
+                            con.close()
+
+                            if action == "CONFIRMAR":
+                                reply_msg = f"🙌 ¡Muchas gracias! Tu respuesta para el servicio *{titulo}* ({fecha_fmt}) ha sido registrada exitosamente como CONFIRMADA."
+                            else:
+                                reply_msg = f"⚠️ Tu respuesta para el servicio *{titulo}* ({fecha_fmt}) ha sido registrada como CANCELADA / NO DISPONIBLE. El administrador de UT TEKVO ha sido notificado."
+                            send_waha_text(sender_phone, reply_msg)
+
+                            if rol == "CLIENTE" and action == "CANCELAR":
+                                tec_alert = f"⚠️ *Aviso de Cancelación*\n\nHola {tec_nom}, la cita de *{titulo}* programada para {fecha_fmt} con {cli_nom} ha sido CANCELADA por el cliente.\n\nTu agenda queda liberada en esa franja horaria."
+                                send_waha_text(tec_tel, tec_alert)
+
+                            admin_alert = (
+                                f"🔔 *Actualización de Cita UT TEKVO*\n\n"
+                                f"- Cita: *{titulo}* ({fecha_fmt})\n"
+                                f"- Quien respondió: {cli_nom if rol == 'CLIENTE' else tec_nom} ({rol})\n"
+                                f"- Respuesta: {'✅ CONFIRMADO' if action == 'CONFIRMAR' else '❌ CANCELADO'}\n"
+                                f"- Estado Cita: {nuevo_estado}"
+                            )
+
+                            if nuevo_estado == "CONFIRMADA":
+                                admin_alert += "\n👉 Cita 100% confirmada. Se envió opción de Inicio de Labor al técnico."
+                                # Enviar poll al técnico para iniciar labor
+                                poll_tit = (titulo[:55] + "...") if len(titulo) > 55 else titulo
+                                poll_cli = (cli_nom[:35] + "...") if len(cli_nom) > 35 else cli_nom
+                                tec_start_poll = f"🛠️ *UT TEKVO - Inicio de Labor*\n\n¿Estás listo para iniciar la labor de *{poll_tit}* con {poll_cli}?"
+                                send_waha_poll(tec_tel, tec_start_poll, ["▶️ Iniciar Labor"])
+
+                            send_waha_text(adm_tel, admin_alert)
+                            print(f"[Admin Alert Sent] to {adm_tel}: {admin_alert[:60]}...", flush=True)
+
+                        else:
+                            # Fallback: si envió "1" o "2", verificar si es CSAT para cita completada
+                            if body_text in ["1", "2"]:
+                                score = int(body_text)
+                                rows_csat = con.run("""
+                                    SELECT c.id, c.titulo,
+                                           cli.nombre AS cli_nom, cli.telefono_whatsapp AS cli_tel,
+                                           tec.nombre AS tec_nom, tec.telefono_whatsapp AS tec_tel,
+                                           COALESCE(adm.telefono_whatsapp, '+573118198511') AS adm_tel,
+                                           c.direccion_servicio
+                                    FROM citas c
+                                    JOIN usuarios cli ON c.cliente_id = cli.id
+                                    JOIN usuarios tec ON c.tecnico_id = tec.id
+                                    LEFT JOIN usuarios adm ON c.admin_id = adm.id
+                                    WHERE REGEXP_REPLACE(cli.telefono_whatsapp, '[^0-9]', '', 'g') = :p
+                                      AND c.estado = 'COMPLETADA'
+                                      AND c.calificacion IS NULL
+                                    ORDER BY c.fecha_fin_real DESC NULLS LAST, c.updated_at DESC
+                                    LIMIT 1
+                                """, p=clean_p)
+                                if rows_csat:
+                                    cita_id, titulo, cli_nom, cli_tel, tec_nom, tec_tel, adm_tel, direccion = rows_csat[0]
+                                    con.run("UPDATE citas SET calificacion = :score, updated_at = NOW() WHERE id = :id", score=score, id=cita_id)
+                                    con.close()
+                                    send_waha_text(cli_tel, f"🙌 ¡Muchas gracias por tu calificación de {score}/5 ⭐!\nEn UT TEKVO valoramos tu opinión para seguir brindando el mejor servicio.")
+                                    send_waha_text(tec_tel, f"⭐ *Calificación de Cliente - UT TEKVO*\n\nEl cliente {cli_nom} ha calificado tu servicio en *{titulo}* con *{score}/5 ⭐*.")
+                                    adm_alert = (
+                                        f"🚨 *ALERTA CSAT BAJO - UT TEKVO*\n\n"
+                                        f"El cliente *{cli_nom}* ({cli_tel}) calificó con *{score}/5 ⭐* el servicio *{titulo}* atendido por {tec_nom}.\n"
+                                        f"📍 Dirección: {direccion}\n"
+                                        f"👉 *Atención Inmediata:* Se sugiere contactar al cliente para seguimiento y control de calidad."
+                                    )
+                                    send_waha_text(adm_tel, adm_alert)
+                                    print(f"[CSAT Fallback Registrado] Cita {cita_id} calificada con {score}/5 por {cli_nom}", flush=True)
+                                else:
+                                    con.close()
+                                    print(f"[WAHA Inbound] No pending cita or unrated completed cita found for phone {sender_phone}", flush=True)
+                            else:
+                                con.close()
+                                print(f"[WAHA Inbound] No pending cita found for phone {sender_phone} (clean: {clean_p})", flush=True)
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

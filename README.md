@@ -274,7 +274,10 @@ En las versiones modernas de WhatsApp Web / Multi-Device, cuando un usuario pres
 4. Consulta la base de datos PostgreSQL para identificar si el votante es el **Cliente** o el **Técnico**.
 5. Actualiza la columna correspondiente (`confirmacion_cliente` o `confirmacion_tecnico`).
 6. Si ambos confirman, la cita transiciona automáticamente a estado `CONFIRMADA`.
-7. Despacha un mensaje de confirmación de vuelta al votante y una notificación de auditoría al número de WhatsApp del **Administrador**.
+7. **Inicio de Labor:** Al alcanzar el estado `CONFIRMADA`, se despacha automáticamente una encuesta interactiva al técnico con la opción `[▶️ Iniciar Labor]`.
+8. **Ejecución en Progreso:** Al presionar `[▶️ Iniciar Labor]`, se registra `fecha_inicio_real = NOW()`, el estado pasa a `EN_PROGRESO`, se notifica al cliente que el técnico comenzó labores, se avisa al administrador y se le envía al técnico el botón `[⏹️ Finalizar Labor]`.
+9. **Finalización de Labor:** Al culminar el trabajo y presionar `[⏹️ Finalizar Labor]`, se registra `fecha_fin_real = NOW()`, el estado pasa a `COMPLETADA`, se computa la duración real exacta (`Xh Ym`), se confirma al técnico, se notifica al administrador y se envía automáticamente la encuesta de satisfacción CSAT al cliente.
+10. **Calificación CSAT (1 a 5 ⭐):** El cliente recibe una encuesta interactiva en WhatsApp con opciones de 1 a 5 estrellas (`⭐ 5 - Excelente` a `⭐ 1 - Muy Malo`). Al emitir su voto, se registra en la base de datos, se agradece al cliente y se notifica al administrador (disparando una alerta prioritaria roja si el puntaje es de 1 o 2 estrellas para atención de garantías y control de calidad).
 
 ---
 
@@ -315,6 +318,9 @@ erDiagram
         timestamptz fecha_confirmacion_cliente
         timestamptz fecha_confirmacion_tecnico
         text motivo_cancelacion
+        timestamptz fecha_inicio_real
+        timestamptz fecha_fin_real
+        smallint calificacion
         timestamptz created_at
         timestamptz updated_at
     }

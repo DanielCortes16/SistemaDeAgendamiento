@@ -72,6 +72,9 @@ CREATE TABLE IF NOT EXISTS citas (
     fecha_confirmacion_cliente TIMESTAMPTZ,
     fecha_confirmacion_tecnico TIMESTAMPTZ,
     motivo_cancelacion TEXT,
+    fecha_inicio_real TIMESTAMPTZ,
+    fecha_fin_real TIMESTAMPTZ,
+    calificacion SMALLINT CHECK (calificacion BETWEEN 1 AND 5),
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT check_rango_fechas CHECK (fecha_fin > fecha_inicio)
