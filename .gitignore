@@ -1,0 +1,38 @@
+# Environment variables and credentials
+.env
+*.env.local
+*.env.*.local
+
+# Python cache and temporary files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# SQLite databases & temp db files
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# WAHA and runtime sessions
+.sessions/
+sessions/
+*.log
+
+# Editor & OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Temporary files
+/tmp/
+*.bak

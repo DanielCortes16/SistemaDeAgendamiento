@@ -1,0 +1,760 @@
+{
+  "name": "Sistema de Agendamiento y Notificaciones (Outlook + Multi-Rol + WhatsApp)",
+  "nodes": [
+    {
+      "parameters": {
+        "event": "eventCreated",
+        "options": {}
+      },
+      "name": "Outlook Trigger: Nueva Cita en Calendario",
+      "type": "n8n-nodes-base.microsoftOutlookTrigger",
+      "typeVersion": 1,
+      "position": [
+        -120,
+        200
+      ],
+      "id": "node-outlook-trigger",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\n\n// Extrae el cuerpo del evento (HTML o texto plano)\nconst rawBody = item.body?.content || item.bodyPreview || '';\nconst cleanBody = rawBody.replace(/<[^>]*>/g, ' ');\n\n// Expresiones regulares para la plantilla\nconst clienteMatch = cleanBody.match(/Cliente:\\s*([^\\n\\r;]+)/i);\nconst telMatch = cleanBody.match(/Tel(?:[eé]fono)?(?:\\s*WhatsApp)?:\\s*([+\\d\\s-]{8,})/i);\nconst tecnicoMatch = cleanBody.match(/T[eé]cnico:\\s*([^\\n\\r;]+)/i);\nconst dirMatch = cleanBody.match(/Direcci[oó]n:\\s*([^\\n\\r;]+)/i);\nconst notasMatch = cleanBody.match(/Notas?:\\s*([^\\n\\r]+)/i);\n\n// Formateo de teléfono a estándar E.164\nlet telefono = telMatch ? telMatch[1].replace(/[\\s-]/g, '') : '';\nif (telefono && !telefono.startsWith('+')) {\n  telefono = '+' + telefono;\n}\n\n// Extracción del técnico (por cuerpo o asistentes)\nlet tecnicoNombre = tecnicoMatch ? tecnicoMatch[1].trim() : '';\nlet tecnicoEmail = '';\nif (item.attendees && item.attendees.length > 0) {\n  if (!tecnicoNombre) tecnicoNombre = item.attendees[0].emailAddress?.name || '';\n  tecnicoEmail = item.attendees[0].emailAddress?.address || '';\n}\n\n// Extracción dinámica del Administrador organizador\nconst adminEmail = item.organizer?.emailAddress?.address || '';\nconst adminNombre = item.organizer?.emailAddress?.name || '';\n\nreturn [{\n  json: {\n    microsoft_event_id: item.id,\n    titulo: item.subject || 'Servicio Agendado',\n    fecha_inicio: item.start?.dateTime,\n    fecha_fin: item.end?.dateTime,\n    cliente_nombre: clienteMatch ? clienteMatch[1].trim() : (item.subject || 'Cliente'),\n    cliente_telefono: telefono || '+573118198511',\n    tecnico_nombre: tecnicoNombre || 'Carlos Técnico',\n    tecnico_email: tecnicoEmail,\n    admin_email: adminEmail,\n    admin_nombre: adminNombre,\n    direccion_servicio: dirMatch ? dirMatch[1].trim() : (item.location?.displayName || 'Por confirmar'),\n    descripcion: notasMatch ? notasMatch[1].trim() : (item.bodyPreview || 'Servicio agendado desde calendario')\n  }\n}];\n"
+      },
+      "name": "Code: Parser de Plantilla Outlook",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        140,
+        200
+      ],
+      "id": "node-code-parse-outlook"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "citas/crear",
+        "options": {}
+      },
+      "name": "Webhook: Entrada Alternativa API",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -120,
+        400
+      ],
+      "id": "node-webhook-crear",
+      "webhookId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3d2b01"
+    },
+    {
+      "parameters": {
+        "jsCode": "const b = $input.first().json.body;\nreturn [{\n  json: {\n    microsoft_event_id: b.microsoft_event_id || null,\n    titulo: b.titulo,\n    fecha_inicio: b.fecha_inicio,\n    fecha_fin: b.fecha_fin,\n    cliente_nombre: b.cliente_nombre || 'Cliente',\n    cliente_telefono: b.cliente_telefono || '+573118198511',\n    tecnico_nombre: b.tecnico_nombre || 'Carlos Técnico',\n    tecnico_email: b.tecnico_email || '',\n    admin_email: b.admin_email || '',\n    direccion_servicio: b.direccion_servicio || 'Dirección registrada',\n    descripcion: b.descripcion || ''\n  }\n}];\n"
+      },
+      "name": "Code: Normalizar Entrada Webhook",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        140,
+        400
+      ],
+      "id": "node-code-norm-webhook"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=WITH \n-- 1. Asegurar o buscar Cliente dinámico\ncli AS (\n  INSERT INTO usuarios (nombre, email, telefono_whatsapp, rol)\n  VALUES (\n    '{{ $json.cliente_nombre }}',\n    'cli_' || REGEXP_REPLACE('{{ $json.cliente_telefono }}', '[^0-9]', '', 'g') || '@cliente.com',\n    '{{ $json.cliente_telefono }}',\n    'CLIENTE'\n  )\n  ON CONFLICT (email) DO UPDATE SET \n    nombre = EXCLUDED.nombre, \n    telefono_whatsapp = EXCLUDED.telefono_whatsapp\n  RETURNING id, nombre, email, telefono_whatsapp\n),\n-- 2. Buscar Técnico dinámico (por email o nombre, fallback al primero activo)\ntec AS (\n  SELECT id, nombre, email, telefono_whatsapp \n  FROM usuarios \n  WHERE rol = 'TECNICO' AND activo = true\n  ORDER BY \n    CASE \n      WHEN email = '{{ $json.tecnico_email }}' THEN 1\n      WHEN LOWER(nombre) = LOWER('{{ $json.tecnico_nombre }}') THEN 2\n      ELSE 3 \n    END ASC\n  LIMIT 1\n),\n-- 3. Buscar Administrador dinámico (por email del organizador, fallback al principal activo)\nadm AS (\n  SELECT id, nombre, email, telefono_whatsapp \n  FROM usuarios \n  WHERE rol = 'ADMINISTRADOR' AND activo = true\n  ORDER BY \n    CASE \n      WHEN email = '{{ $json.admin_email }}' THEN 1\n      ELSE 2 \n    END ASC\n  LIMIT 1\n),\n-- 4. Insertar la cita vinculando cliente, técnico y administrador organizador\nnueva_cita AS (\n  INSERT INTO citas (\n    cliente_id, \n    tecnico_id, \n    admin_id, \n    titulo, \n    descripcion, \n    direccion_servicio, \n    fecha_inicio, \n    fecha_fin, \n    estado, \n    microsoft_event_id, \n    confirmacion_cliente, \n    confirmacion_tecnico,\n    recordatorio_24h_enviado,\n    recordatorio_cliente_enviado,\n    recordatorio_tecnico_enviado,\n    recordatorio_enviado_at\n  )\n  SELECT \n    cli.id, \n    tec.id, \n    adm.id, \n    '{{ $json.titulo }}', \n    '{{ $json.descripcion }}', \n    '{{ $json.direccion_servicio }}', \n    '{{ $json.fecha_inicio }}'::timestamptz, \n    '{{ $json.fecha_fin }}'::timestamptz, \n    'PENDIENTE', \n    '{{ $json.microsoft_event_id }}', \n    'PENDIENTE', \n    'PENDIENTE',\n    CASE WHEN '{{ $json.fecha_inicio }}'::timestamptz <= (NOW() + INTERVAL '24 hours') THEN TRUE ELSE FALSE END,\n    CASE WHEN '{{ $json.fecha_inicio }}'::timestamptz <= (NOW() + INTERVAL '24 hours') THEN TRUE ELSE FALSE END,\n    CASE WHEN '{{ $json.fecha_inicio }}'::timestamptz <= (NOW() + INTERVAL '24 hours') THEN TRUE ELSE FALSE END,\n    CASE WHEN '{{ $json.fecha_inicio }}'::timestamptz <= (NOW() + INTERVAL '24 hours') THEN NOW() ELSE NULL END\n  FROM cli, tec, adm\n  RETURNING id, titulo, descripcion, direccion_servicio, fecha_inicio, fecha_fin, cliente_id, tecnico_id, admin_id, recordatorio_24h_enviado\n)\nSELECT \n  nc.id AS cita_id,\n  nc.titulo,\n  nc.descripcion,\n  nc.direccion_servicio,\n  TO_CHAR(nc.fecha_inicio AT TIME ZONE 'America/Bogota', 'YYYY-MM-DD HH24:MI') AS fecha_inicio_fmt,\n  TO_CHAR(nc.fecha_fin AT TIME ZONE 'America/Bogota', 'YYYY-MM-DD HH24:MI') AS fecha_fin_fmt,\n  nc.recordatorio_24h_enviado AS es_inminente,\n  cli.nombre AS cliente_nombre,\n  cli.telefono_whatsapp AS cliente_telefono,\n  tec.nombre AS tecnico_nombre,\n  tec.telefono_whatsapp AS tecnico_telefono,\n  adm.nombre AS admin_nombre,\n  adm.telefono_whatsapp AS admin_telefono\nFROM nueva_cita nc\nJOIN cli ON nc.cliente_id = cli.id\nJOIN tec ON nc.tecnico_id = tec.id\nJOIN adm ON nc.admin_id = adm.id;"
+      },
+      "name": "PG: Registrar Cita y Usuarios",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        400,
+        300
+      ],
+      "id": "node-pg-guardar",
+      "credentials": {
+        "postgres": {
+          "id": "EpZbXPbxH2neHcMU",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT \n  c.id AS cita_id,\n  c.titulo,\n  c.descripcion,\n  c.direccion_servicio,\n  TO_CHAR(c.fecha_inicio AT TIME ZONE 'America/Bogota', 'YYYY-MM-DD HH24:MI') AS fecha_inicio_fmt,\n  TO_CHAR(c.fecha_fin AT TIME ZONE 'America/Bogota', 'YYYY-MM-DD HH24:MI') AS fecha_fin_fmt,\n  c.fecha_inicio,\n  c.fecha_fin,\n  cli.id AS cliente_id,\n  cli.nombre AS cliente_nombre,\n  cli.email AS cliente_email,\n  cli.telefono_whatsapp AS cliente_telefono,\n  tec.id AS tecnico_id,\n  tec.nombre AS tecnico_nombre,\n  tec.email AS tecnico_email,\n  tec.telefono_whatsapp AS tecnico_telefono,\n  adm.nombre AS admin_nombre,\n  adm.telefono_whatsapp AS admin_telefono\nFROM citas c\nJOIN usuarios cli ON c.cliente_id = cli.id\nJOIN usuarios tec ON c.tecnico_id = tec.id\nCROSS JOIN (SELECT nombre, telefono_whatsapp FROM usuarios WHERE rol = 'ADMINISTRADOR' AND activo = true LIMIT 1) adm\nWHERE c.id = '{{ $json.id }}';"
+      },
+      "name": "PG: Obtener Datos Contactos",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        640,
+        300
+      ],
+      "id": "node-pg-obtener-contactos",
+      "credentials": {
+        "postgres": {
+          "id": "EpZbXPbxH2neHcMU",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.es_inminente ? 'http://citas_waha:3000/api/sendPoll' : 'http://citas_waha:3000/api/sendText' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Api-Key",
+              "value": "citas-waha-key-2026"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  (() => {\n    let phone = ($json.cliente_telefono || \"\").replace(\"+\", \"\").replace(/[^0-9]/g, \"\") + \"@c.us\";\n    if ($json.es_inminente) {\n      const TARGET_MAX = 245;\n      let hora_fin = ($json.fecha_fin_fmt || \"\").includes(\" \") ? $json.fecha_fin_fmt.split(\" \")[1] : ($json.fecha_fin_fmt || \"\");\n      let fecha_ini = ($json.fecha_inicio_fmt || \"\");\n      let titulo = ($json.titulo || \"Servicio\").trim();\n      let tecnico = ($json.tecnico_nombre || \"Técnico\").trim();\n      let direccion = ($json.direccion_servicio || \"Por confirmar\").trim();\n\n      let base = \"👋 *Cita Tekvo:* \\n🔧 Técnico: \\n📅 \" + fecha_ini + \" - \" + hora_fin + \"\\n📍 \\n\\n¿Confirmas tu asistencia?\";\n      let available = TARGET_MAX - base.length;\n\n      while ((titulo.length + tecnico.length + direccion.length) > available) {\n        if (direccion.length > 35) {\n          direccion = direccion.slice(0, -1);\n        } else if (titulo.length > 45) {\n          titulo = titulo.slice(0, -1);\n        } else if (tecnico.length > 25) {\n          tecnico = tecnico.slice(0, -1);\n        } else if (direccion.length > 20) {\n          direccion = direccion.slice(0, -1);\n        } else if (titulo.length > 20) {\n          titulo = titulo.slice(0, -1);\n        } else {\n          direccion = direccion.slice(0, -1);\n        }\n      }\n\n      let pollName = \"👋 *Cita Tekvo:* \" + titulo + \"\\n\" +\n                     \"🔧 Técnico: \" + tecnico + \"\\n\" +\n                     \"📅 \" + fecha_ini + \" - \" + hora_fin + \"\\n\" +\n                     \"📍 \" + direccion + \"\\n\\n\" +\n                     \"¿Confirmas tu asistencia?\";\n\n      return JSON.stringify({\n        session: \"default\",\n        chatId: phone,\n        poll: {\n          name: pollName,\n          options: [\n            \"✅ Sí, confirmo\",\n            \"❌ Cancelar cita\"\n          ],\n          multipleAnswers: false\n        }\n      });\n    } else {\n      return JSON.stringify({\n        session: \"default\",\n        chatId: phone,\n        text: \"👋 Hola \" + $json.cliente_nombre + \", tu cita para *\" + $json.titulo + \"* ha sido agendada para el día *\" + $json.fecha_inicio_fmt + \"* (hasta \" + $json.fecha_fin_fmt + \").\\n\\n🔧 Técnico asignado: \" + $json.tecnico_nombre + \"\\n📍 Ubicación: \" + $json.direccion_servicio + \"\\n\\n⏰ Te enviaremos un recordatorio 24 horas antes de la cita con las opciones para confirmar tu asistencia.\"\n      });\n    }\n  })()\n}}"
+      },
+      "name": "WA: Notificar Creacion a Cliente",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        160
+      ],
+      "id": "node-wa-cliente-creacion",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.es_inminente ? 'http://citas_waha:3000/api/sendPoll' : 'http://citas_waha:3000/api/sendText' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Api-Key",
+              "value": "citas-waha-key-2026"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  (() => {\n    let phone = ($json.tecnico_telefono || \"\").replace(\"+\", \"\").replace(/[^0-9]/g, \"\") + \"@c.us\";\n    if ($json.es_inminente) {\n      const TARGET_MAX = 245;\n      let hora_fin = ($json.fecha_fin_fmt || \"\").includes(\" \") ? $json.fecha_fin_fmt.split(\" \")[1] : ($json.fecha_fin_fmt || \"\");\n      let fecha_ini = ($json.fecha_inicio_fmt || \"\");\n      let tel = ($json.cliente_telefono || \"\").trim();\n      let titulo = ($json.titulo || \"Servicio\").trim();\n      let cliente = ($json.cliente_nombre || \"Cliente\").trim();\n      let direccion = ($json.direccion_servicio || \"Por confirmar\").trim();\n\n      let base = \"🛠️ *Labor:* \\n👤  (\" + tel + \")\\n📅 \" + fecha_ini + \" - \" + hora_fin + \"\\n📍 \\n\\n¿Confirmas disponibilidad?\";\n      let available = TARGET_MAX - base.length;\n\n      while ((titulo.length + cliente.length + direccion.length) > available) {\n        if (direccion.length > 35) {\n          direccion = direccion.slice(0, -1);\n        } else if (titulo.length > 40) {\n          titulo = titulo.slice(0, -1);\n        } else if (cliente.length > 25) {\n          cliente = cliente.slice(0, -1);\n        } else if (direccion.length > 20) {\n          direccion = direccion.slice(0, -1);\n        } else if (titulo.length > 20) {\n          titulo = titulo.slice(0, -1);\n        } else {\n          direccion = direccion.slice(0, -1);\n        }\n      }\n\n      let pollName = \"🛠️ *Labor:* \" + titulo + \"\\n\" +\n                     \"👤 \" + cliente + \" (\" + tel + \")\\n\" +\n                     \"📅 \" + fecha_ini + \" - \" + hora_fin + \"\\n\" +\n                     \"📍 \" + direccion + \"\\n\\n\" +\n                     \"¿Confirmas disponibilidad?\";\n\n      return JSON.stringify({\n        session: \"default\",\n        chatId: phone,\n        poll: {\n          name: pollName,\n          options: [\n            \"✅ Sí, confirmo\",\n            \"❌ Cancelar labor\"\n          ],\n          multipleAnswers: false\n        }\n      });\n    } else {\n      return JSON.stringify({\n        session: \"default\",\n        chatId: phone,\n        text: \"🛠️ *Nueva Asignación de Servicio Tekvo*\\n\\nHola \" + $json.tecnico_nombre + \", se te asignó la siguiente labor:\\n- Servicio: *\" + $json.titulo + \"*\\n- Fecha: \" + $json.fecha_inicio_fmt + \" a \" + $json.fecha_fin_fmt + \"\\n- Cliente: \" + $json.cliente_nombre + \" (\" + $json.cliente_telefono + \")\\n- Ubicación: \" + $json.direccion_servicio + \"\\n\\n⏰ Te enviaremos un recordatorio 24 horas antes de la cita para confirmar tu disponibilidad.\"\n      });\n    }\n  })()\n}}"
+      },
+      "name": "WA: Notificar Creacion a Tecnico",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        300
+      ],
+      "id": "node-wa-tecnico-creacion",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://citas_waha:3000/api/sendText",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Api-Key",
+              "value": "citas-waha-key-2026"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  JSON.stringify({\n    session: \"default\",\n    chatId: ($json.admin_telefono || \"+573118198511\").replace(\"+\", \"\") + \"@c.us\",\n    text: \"📋 *Cita Agendada Exitosamente*\\n\\n- ID Cita: \" + $json.cita_id + \"\\n- Cliente: \" + $json.cliente_nombre + \"\\n- Técnico: \" + $json.tecnico_nombre + \"\\n- Fecha: \" + $json.fecha_inicio_fmt\n  })\n}}"
+      },
+      "name": "WA: Notificar Creacion a Admin",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        440
+      ],
+      "id": "node-wa-admin-creacion",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "name": "Cron: Cada 15 min (Citas a 24h)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        160,
+        750
+      ],
+      "id": "node-cron-24h"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  c.id AS cita_id,\n  c.titulo,\n  c.direccion_servicio,\n  TO_CHAR(c.fecha_inicio AT TIME ZONE 'America/Bogota', 'YYYY-MM-DD HH24:MI') AS fecha_fmt,\n  cli.nombre AS cliente_nombre,\n  cli.telefono_whatsapp AS cliente_telefono,\n  tec.nombre AS tecnico_nombre,\n  tec.telefono_whatsapp AS tecnico_telefono\nFROM citas c\nJOIN usuarios cli ON c.cliente_id = cli.id\nJOIN usuarios tec ON c.tecnico_id = tec.id\nWHERE c.estado = 'PENDIENTE'\n  AND c.fecha_inicio BETWEEN NOW() AND (NOW() + INTERVAL '24 hours')\n  AND c.created_at < (NOW() - INTERVAL '4 hours')\n  AND c.recordatorio_24h_enviado = FALSE\n  AND (c.recordatorio_cliente_enviado = FALSE OR c.recordatorio_tecnico_enviado = FALSE);"
+      },
+      "name": "PG: Buscar Citas 24h Antes",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        400,
+        750
+      ],
+      "id": "node-pg-buscar-24h",
+      "credentials": {
+        "postgres": {
+          "id": "EpZbXPbxH2neHcMU",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://citas_waha:3000/api/sendPoll",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Api-Key",
+              "value": "citas-waha-key-2026"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  (() => {\n    let phone = ($json.cliente_telefono || \"\").replace(\"+\", \"\").replace(/[^0-9]/g, \"\") + \"@c.us\";\n    const TARGET_MAX = 245;\n    let fecha = ($json.fecha_fmt || \"\").trim();\n    let base = \"⏰ Recordatorio Tekvo: ¿Confirmas tu cita de mañana a las \" + fecha + \" para ?\";\n    let available = TARGET_MAX - base.length;\n    let titulo = ($json.titulo || \"Servicio\").trim();\n    if (titulo.length > available) {\n      titulo = titulo.slice(0, available - 3) + \"...\";\n    }\n\n    return JSON.stringify({\n      session: \"default\",\n      chatId: phone,\n      poll: {\n        name: \"⏰ Recordatorio Tekvo: ¿Confirmas tu cita de mañana a las \" + fecha + \" para \" + titulo + \"?\",\n        options: [\n          \"✅ Sí, confirmo\",\n          \"❌ Cancelar cita\"\n        ],\n        multipleAnswers: false\n      }\n    });\n  })()\n}}"
+      },
+      "name": "WA: 24h Botones a Cliente",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        640,
+        680
+      ],
+      "id": "node-wa-botones-cliente",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://citas_waha:3000/api/sendPoll",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Api-Key",
+              "value": "citas-waha-key-2026"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  (() => {\n    let phone = ($json.tecnico_telefono || \"\").replace(\"+\", \"\").replace(/[^0-9]/g, \"\") + \"@c.us\";\n    const TARGET_MAX = 245;\n    let fecha = ($json.fecha_fmt || \"\").trim();\n    let base = \"🛠️ Tekvo: ¿Confirmas disponibilidad para mañana a las \" + fecha + \" ()?\";\n    let available = TARGET_MAX - base.length;\n    let titulo = ($json.titulo || \"Servicio\").trim();\n    if (titulo.length > available) {\n      titulo = titulo.slice(0, available - 3) + \"...\";\n    }\n\n    return JSON.stringify({\n      session: \"default\",\n      chatId: phone,\n      poll: {\n        name: \"🛠️ Tekvo: ¿Confirmas disponibilidad para mañana a las \" + fecha + \" (\" + titulo + \")?\",\n        options: [\n          \"✅ Sí, confirmo\",\n          \"❌ Cancelar labor\"\n        ],\n        multipleAnswers: false\n      }\n    });\n  })()\n}}"
+      },
+      "name": "WA: 24h Botones a Tecnico",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        640,
+        820
+      ],
+      "id": "node-wa-botones-tecnico",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE citas \nSET recordatorio_cliente_enviado = TRUE, \n    recordatorio_tecnico_enviado = TRUE, \n    recordatorio_24h_enviado = TRUE, \n    recordatorio_enviado_at = NOW() \nWHERE id = '{{ $(\"PG: Buscar Citas 24h Antes\").item.json.cita_id }}';"
+      },
+      "name": "PG: Marcar Recordatorios 24h Enviados",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        900,
+        750
+      ],
+      "id": "node-pg-marcar-recordatorios",
+      "credentials": {
+        "postgres": {
+          "id": "EpZbXPbxH2neHcMU",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp/webhook",
+        "options": {}
+      },
+      "name": "Webhook: Meta WhatsApp Inbound",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        160,
+        1200
+      ],
+      "id": "node-webhook-wa-inbound",
+      "webhookId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3d2b02"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body;\n\n// 1. Manejo del Handshake inicial de Meta (GET verification)\nif ($input.first().json.query && $input.first().json.query['hub.challenge']) {\n  return [{\n    json: {\n      challenge: $input.first().json.query['hub.challenge'],\n      is_challenge: true\n    }\n  }];\n}\n\n// 2. Procesamiento de botón presionado (POST)\ntry {\n  const entry = body.entry?.[0];\n  const change = entry?.changes?.[0];\n  const message = change?.value?.messages?.[0];\n\n  if (message && message.type === 'interactive' && message.interactive.type === 'button_reply') {\n    const buttonId = message.interactive.button_reply.id;\n    const senderPhone = '+' + message.from;\n    \n    // buttonId formato: \"CONFIRMAR_CLIENTE_<UUID>\", \"CANCELAR_TECNICO_<UUID>\", etc.\n    const parts = buttonId.split('_');\n    const action = parts[0]; // CONFIRMAR o CANCELAR\n    const rol = parts[1];    // CLIENTE o TECNICO\n    const citaId = parts.slice(2).join('_');\n\n    return [{\n      json: {\n        is_challenge: false,\n        valid_action: true,\n        action: action,\n        rol: rol,\n        cita_id: citaId,\n        sender_phone: senderPhone\n      }\n    }];\n  }\n} catch (e) {\n  // Mensaje no interactivo o error de parseo\n}\n\n// Para recibos de entrega (sent, delivered, read) o mensajes no interactivos, terminar flujo limpiamente\nreturn [];\n"
+      },
+      "name": "Code: Parsear Boton Meta Multi-Rol",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        380,
+        1200
+      ],
+      "id": "node-code-parse-button"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE citas \nSET \n  confirmacion_cliente = CASE \n    WHEN '{{ $json.rol }}' = 'CLIENTE' THEN (CASE WHEN '{{ $json.action }}' = 'CONFIRMAR' THEN 'CONFIRMADA' ELSE 'CANCELADA' END)\n    ELSE confirmacion_cliente \n  END,\n  fecha_confirmacion_cliente = CASE \n    WHEN '{{ $json.rol }}' = 'CLIENTE' THEN NOW() \n    ELSE fecha_confirmacion_cliente \n  END,\n  confirmacion_tecnico = CASE \n    WHEN '{{ $json.rol }}' = 'TECNICO' THEN (CASE WHEN '{{ $json.action }}' = 'CONFIRMAR' THEN 'CONFIRMADA' ELSE 'CANCELADA' END)\n    ELSE confirmacion_tecnico \n  END,\n  fecha_confirmacion_tecnico = CASE \n    WHEN '{{ $json.rol }}' = 'TECNICO' THEN NOW() \n    ELSE fecha_confirmacion_tecnico \n  END,\n  motivo_cancelacion = CASE\n    WHEN '{{ $json.rol }}' = 'CLIENTE' AND '{{ $json.action }}' = 'CANCELAR' THEN 'Cancelada por el cliente 24h antes'\n    WHEN '{{ $json.rol }}' = 'TECNICO' AND '{{ $json.action }}' = 'CANCELAR' THEN 'Técnico indicó que no está disponible'\n    ELSE motivo_cancelacion\n  END,\n  estado = CASE \n    WHEN '{{ $json.rol }}' = 'CLIENTE' AND '{{ $json.action }}' = 'CANCELAR' THEN 'CANCELADA'::estado_cita_enum\n    WHEN '{{ $json.rol }}' = 'TECNICO' AND '{{ $json.action }}' = 'CANCELAR' AND confirmacion_cliente != 'CANCELADA' THEN 'REQUIERE_REASIGNACION'::estado_cita_enum\n    WHEN (CASE WHEN '{{ $json.rol }}' = 'CLIENTE' THEN 'CONFIRMADA' ELSE confirmacion_cliente END) = 'CONFIRMADA' \n     AND (CASE WHEN '{{ $json.rol }}' = 'TECNICO' THEN 'CONFIRMADA' ELSE confirmacion_tecnico END) = 'CONFIRMADA' THEN 'CONFIRMADA'::estado_cita_enum\n    ELSE estado\n  END,\n  updated_at = NOW()\nWHERE id = '{{ $json.cita_id }}'\nRETURNING id;"
+      },
+      "name": "PG: Ejecutar Actualizacion de Estados",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        600,
+        1200
+      ],
+      "id": "node-pg-actualizar-estados",
+      "credentials": {
+        "postgres": {
+          "id": "EpZbXPbxH2neHcMU",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT \n  c.id AS cita_id,\n  c.titulo,\n  TO_CHAR(c.fecha_inicio AT TIME ZONE 'America/Bogota', 'YYYY-MM-DD HH24:MI') AS fecha_fmt,\n  c.estado,\n  c.confirmacion_cliente,\n  c.confirmacion_tecnico,\n  c.motivo_cancelacion,\n  '{{ $('Code: Parsear Boton Meta Multi-Rol').item.json.rol }}' AS rol_que_respondio,\n  '{{ $('Code: Parsear Boton Meta Multi-Rol').item.json.action }}' AS accion_tomada,\n  '{{ $('Code: Parsear Boton Meta Multi-Rol').item.json.sender_phone }}' AS sender_phone,\n  cli.nombre AS cliente_nombre,\n  cli.telefono_whatsapp AS cliente_telefono,\n  tec.nombre AS tecnico_nombre,\n  tec.telefono_whatsapp AS tecnico_telefono,\n  COALESCE(adm.telefono_whatsapp, default_adm.telefono_whatsapp) AS admin_telefono\nFROM citas c\nJOIN usuarios cli ON c.cliente_id = cli.id\nJOIN usuarios tec ON c.tecnico_id = tec.id\nLEFT JOIN usuarios adm ON c.admin_id = adm.id\nCROSS JOIN (SELECT telefono_whatsapp FROM usuarios WHERE rol = 'ADMINISTRADOR' AND activo = true LIMIT 1) default_adm\nWHERE c.id = '{{ $json.id }}';"
+      },
+      "name": "PG: Consultar Datos Completos para Alertas",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        820,
+        1200
+      ],
+      "id": "node-pg-consultar-datos-alertas",
+      "credentials": {
+        "postgres": {
+          "id": "EpZbXPbxH2neHcMU",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://citas_waha:3000/api/sendText",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Api-Key",
+              "value": "citas-waha-key-2026"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  JSON.stringify({\n    session: \"default\",\n    chatId: ($json.sender_phone || \"\").replace(\"+\", \"\") + \"@c.us\",\n    text: ($json.accion_tomada === \"CONFIRMAR\" ? \"🙌 ¡Muchas gracias! Tu respuesta ha sido registrada exitosamente como CONFIRMADA.\" : \"⚠️ Tu respuesta ha sido registrada como CANCELADA / NO DISPONIBLE. El administrador ha sido notificado.\")\n  })\n}}"
+      },
+      "name": "WA: Responder a Quien Presiono Boton",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1080,
+        1080
+      ],
+      "id": "node-wa-feedback-remitente",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-cliente-cancelo",
+              "leftValue": "={{ $json.rol_que_respondio }}",
+              "rightValue": "CLIENTE",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "cond-cliente-accion",
+              "leftValue": "={{ $json.accion_tomada }}",
+              "rightValue": "CANCELAR",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "name": "If: Cliente Cancelo?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1080,
+        1240
+      ],
+      "id": "node-if-cliente-cancelo"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://citas_waha:3000/api/sendText",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Api-Key",
+              "value": "citas-waha-key-2026"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  JSON.stringify({\n    session: \"default\",\n    chatId: ($json.tecnico_telefono || \"\").replace(\"+\", \"\") + \"@c.us\",\n    text: \"⚠️ *Aviso de Cancelación*\\n\\nHola \" + $json.tecnico_nombre + \", la cita de *\" + $json.titulo + \"* programada para mañana \" + $json.fecha_fmt + \" con el cliente \" + $json.cliente_nombre + \" ha sido CANCELADA por el cliente.\\n\\nTu agenda queda liberada en esa franja horaria.\"\n  })\n}}"
+      },
+      "name": "WA: Alertar Tecnico de Cancelacion",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1340,
+        1180
+      ],
+      "id": "node-wa-alertar-tecnico-liberado",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://citas_waha:3000/api/sendText",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Api-Key",
+              "value": "citas-waha-key-2026"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  (() => {\n    let msg = \"\";\n    if ($json.estado === \"CONFIRMADA\") {\n      msg = \"🎉 *CITA 100% CONFIRMADA POR AMBOS*\\n\\n\" +\n            \"- Cita: *\" + $json.titulo + \"* (\" + $json.fecha_fmt + \")\\n\" +\n            \"- Cliente: \" + $json.cliente_nombre + \" (✅)\\n\" +\n            \"- Técnico: \" + $json.tecnico_nombre + \" (✅)\\n\" +\n            \"Todo listo para la ejecución de mañana.\";\n    } else if ($json.rol_que_respondio === \"CLIENTE\" && $json.accion_tomada === \"CANCELAR\") {\n      msg = \"🚨 *ALERTA: CITA CANCELADA POR EL CLIENTE*\\n\\n\" +\n            \"- Cita: *\" + $json.titulo + \"* (\" + $json.fecha_fmt + \")\\n\" +\n            \"- Cliente: \" + $json.cliente_nombre + \"\\n\" +\n            \"- Técnico: \" + $json.tecnico_nombre + \"\\n\" +\n            \"👉 El técnico ya fue notificado y liberado automáticamente.\";\n    } else if ($json.rol_que_respondio === \"TECNICO\" && $json.accion_tomada === \"CANCELAR\") {\n      msg = \"🚨 *URGENTE: TÉCNICO NO DISPONIBLE*\\n\\n\" +\n            \"- Cita: *\" + $json.titulo + \"* (\" + $json.fecha_fmt + \")\\n\" +\n            \"- Técnico: \" + $json.tecnico_nombre + \"\\n\" +\n            \"- Cliente: \" + $json.cliente_nombre + \" (\" + $json.confirmacion_cliente + \")\\n\" +\n            \"👉 ACCIÓN REQUERIDA: Reasignar técnico para este servicio de inmediato.\";\n    } else {\n      msg = \"🔔 *Actualización de Cita*\\n\\n\" +\n            \"- Cita: *\" + $json.titulo + \"* (\" + $json.fecha_fmt + \")\\n\" +\n            \"- Quien respondió: \" + $json.rol_que_respondio + \" (✅ CONFIRMADO)\\n\" +\n            \"• Cliente: \" + $json.confirmacion_cliente + \"\\n\" +\n            \"• Técnico: \" + $json.confirmacion_tecnico + \"\\n\" +\n            \"• Estado: \" + $json.estado;\n    }\n\n    let phone = ($json.admin_telefono || \"+573118198511\").replace(\"+\", \"\");\n    return JSON.stringify({\n      session: \"default\",\n      chatId: phone + \"@c.us\",\n      text: msg\n    });\n  })()\n}}"
+      },
+      "name": "WA: Notificar Estado Completo a Admin",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1080,
+        1420
+      ],
+      "id": "node-wa-admin-notificacion-completa",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "whatsapp/webhook",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Webhook: Meta WhatsApp Verification (GET)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        160,
+        1020
+      ],
+      "id": "node-webhook-wa-get",
+      "webhookId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3d2b03"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.query[\"hub.challenge\"] }}",
+        "options": {}
+      },
+      "name": "Respond to Meta Webhook Challenge",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        380,
+        1020
+      ],
+      "id": "node-respond-meta-challenge"
+    }
+  ],
+  "connections": {
+    "Outlook Trigger: Nueva Cita en Calendario": {
+      "main": [
+        [
+          {
+            "node": "Code: Parser de Plantilla Outlook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code: Parser de Plantilla Outlook": {
+      "main": [
+        [
+          {
+            "node": "PG: Registrar Cita y Usuarios",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: Entrada Alternativa API": {
+      "main": [
+        [
+          {
+            "node": "Code: Normalizar Entrada Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code: Normalizar Entrada Webhook": {
+      "main": [
+        [
+          {
+            "node": "PG: Registrar Cita y Usuarios",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG: Registrar Cita y Usuarios": {
+      "main": [
+        [
+          {
+            "node": "WA: Notificar Creacion a Cliente",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "WA: Notificar Creacion a Tecnico",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "WA: Notificar Creacion a Admin",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG: Obtener Datos Contactos": {
+      "main": [
+        [
+          {
+            "node": "WA: Notificar Creacion a Cliente",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "WA: Notificar Creacion a Tecnico",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "WA: Notificar Creacion a Admin",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cron: Cada 15 min (Citas a 24h)": {
+      "main": [
+        [
+          {
+            "node": "PG: Buscar Citas 24h Antes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG: Buscar Citas 24h Antes": {
+      "main": [
+        [
+          {
+            "node": "WA: 24h Botones a Cliente",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "WA: 24h Botones a Tecnico",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WA: 24h Botones a Cliente": {
+      "main": [
+        [
+          {
+            "node": "PG: Marcar Recordatorios 24h Enviados",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: Meta WhatsApp Inbound": {
+      "main": [
+        [
+          {
+            "node": "Code: Parsear Boton Meta Multi-Rol",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code: Parsear Boton Meta Multi-Rol": {
+      "main": [
+        [
+          {
+            "node": "PG: Ejecutar Actualizacion de Estados",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG: Ejecutar Actualizacion de Estados": {
+      "main": [
+        [
+          {
+            "node": "PG: Consultar Datos Completos para Alertas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG: Consultar Datos Completos para Alertas": {
+      "main": [
+        [
+          {
+            "node": "WA: Responder a Quien Presiono Boton",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "If: Cliente Cancelo?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "WA: Notificar Estado Completo a Admin",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If: Cliente Cancelo?": {
+      "main": [
+        [
+          {
+            "node": "WA: Alertar Tecnico de Cancelacion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: Meta WhatsApp Verification (GET)": {
+      "main": [
+        [
+          {
+            "node": "Respond to Meta Webhook Challenge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  }
+}

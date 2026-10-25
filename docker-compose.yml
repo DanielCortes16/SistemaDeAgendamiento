@@ -1,0 +1,119 @@
+services:
+  # ============================================================================
+  # 1. Base de Datos PostgreSQL
+  # ============================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: citas_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-citas_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-CitasSuperSecretPassword2026!}
+      POSTGRES_DB: ${POSTGRES_DB:-citas_db}
+      TZ: ${TZ:-America/Bogota}
+    ports:
+      # Se expone en el puerto 5433 del host para evitar colisión con otras bases de datos locales
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - citas_postgres_data:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-citas_admin} -d ${POSTGRES_DB:-citas_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - citas_network
+
+  # ============================================================================
+  # 2. Servidor de Automatizaciones n8n
+  # ============================================================================
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: citas_n8n
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      # Expuesto en el puerto 403 del host
+      - "${N8N_HOST_PORT:-403}:5678"
+    environment:
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE:-America/Bogota}
+      - TZ=${TZ:-America/Bogota}
+      - N8N_HOST=${N8N_HOST:-100.86.247.98}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=${N8N_PROTOCOL:-http}
+      - WEBHOOK_URL=${WEBHOOK_URL:-http://100.86.247.98:403/}
+      - N8N_EDITOR_BASE_URL=${N8N_EDITOR_BASE_URL:-http://100.86.247.98:403/}
+      - N8N_SECURE_COOKIE=${N8N_SECURE_COOKIE:-false}
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:-citas_encryption_key_default_32ch}
+      - WHATSAPP_TOKEN=${WHATSAPP_TOKEN}
+      - WHATSAPP_PHONE_NUMBER_ID=${WHATSAPP_PHONE_NUMBER_ID}
+      - WHATSAPP_BUSINESS_ACCOUNT_ID=${WHATSAPP_BUSINESS_ACCOUNT_ID}
+      - WHATSAPP_VERIFY_TOKEN=${WHATSAPP_VERIFY_TOKEN}
+      - ADMIN_WHATSAPP_NUMBER=${ADMIN_WHATSAPP_NUMBER}
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      # Configuración de base de datos propia de n8n (SQLite por defecto para simplicidad o Postgres)
+      # Se utiliza SQLite interno para metadatos de n8n mientras que Postgres almacena las citas y usuarios.
+      - EXECUTIONS_DATA_PRUNE=true
+      - EXECUTIONS_DATA_MAX_AGE=336 # 14 días
+    volumes:
+      - citas_n8n_data:/home/node/.n8n
+    networks:
+      - citas_network
+
+  # ============================================================================
+  # 3. Meta Webhook Bridge (Proxy & Handshake)
+  # ============================================================================
+  meta_bridge:
+    image: python:3.11-alpine
+    container_name: citas_meta_bridge
+    restart: unless-stopped
+    depends_on:
+      - n8n
+    ports:
+      - "8088:8000"
+    volumes:
+      - ./meta_bridge.py:/app/meta_bridge.py:ro
+    command: sh -c "pip install --quiet pg8000 && python /app/meta_bridge.py"
+    networks:
+      citas_network:
+        aliases:
+          - meta.citas.internal
+
+  # ============================================================================
+  # 4. WhatsApp Web Gateway (WAHA - WhatsApp HTTP API)
+  # ============================================================================
+  waha:
+    image: devlikeapro/waha:latest
+    container_name: citas_waha
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - WAHA_API_KEY=citas-waha-key-2026
+      - WAHA_DASHBOARD_ENABLED=True
+      - WAHA_DASHBOARD_USERNAME=admin
+      - WAHA_DASHBOARD_PASSWORD=citaspass
+      - WHATSAPP_DEFAULT_ENGINE=WEBJS
+      - WHATSAPP_HOOK_URL=http://meta.citas.internal:8000/webhook/waha
+      - WHATSAPP_HOOK_EVENTS=message,poll.vote
+    volumes:
+      - citas_waha_data:/app/.sessions
+    networks:
+      - citas_network
+
+networks:
+  citas_network:
+    name: citas_network
+    driver: bridge
+
+volumes:
+  citas_postgres_data:
+    name: citas_postgres_data
+  citas_n8n_data:
+    name: citas_n8n_data
+  citas_waha_data:
+    name: citas_waha_data
