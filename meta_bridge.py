@@ -1768,7 +1768,11 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                         send_waha_poll(tec_tel, fin_poll_name, ["⏹️ Finalizar Labor", "⏳ Sigo trabajando"])
 
                         # 3. Notificar al cliente
-                        cli_msg = f"ℹ️ *Aviso UT TEKVO*\n\nHola {cli_nom}, tu técnico {tec_nom} ha *iniciado* la labor técnica en tu dirección para el servicio *{titulo}* ({hora_inicio})."
+                        cli_msg = (
+                            f"ℹ️ *Aviso UT TEKVO*\n\n"
+                            f"Hola {cli_nom}, tu técnico asignado {tec_nom} ha *iniciado* la labor técnica en tu dirección para el servicio *{titulo}* ({hora_inicio}).\n\n"
+                            f"📞 Para cualquier consulta o seguimiento durante la visita, comunícate con la administración al {adm_tel}."
+                        )
                         send_waha_text(cli_tel, cli_msg)
 
                         # 4. Notificar al administrador
@@ -1913,7 +1917,12 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                             con.close()
 
                             # Responder al cliente
-                            send_waha_text(cli_tel, f"🙌 ¡Muchas gracias por tu calificación de {score}/5 ⭐!\nEn UT TEKVO valoramos tu opinión para seguir brindando el mejor servicio.")
+                            send_waha_text(
+                                cli_tel,
+                                f"🙌 ¡Muchas gracias por tu calificación de {score}/5 ⭐!\n"
+                                f"En UT TEKVO valoramos tu opinión para seguir brindando el mejor servicio.\n\n"
+                                f"📞 Para nuevas solicitudes o soporte, comunícate con nuestra administración al {adm_tel}."
+                            )
 
                             # Notificar al técnico
                             send_waha_text(tec_tel, f"⭐ *Calificación de Cliente - UT TEKVO*\n\nEl cliente {cli_nom} ha calificado tu servicio en *{titulo}* con *{score}/5 ⭐*.")
@@ -2051,14 +2060,14 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                                         f"• *Servicio:* {titulo}\n"
                                         f"• *Fecha y Hora:* {fecha_fmt}\n"
                                         f"• *Técnico Asignado:* {tec_nom}\n"
-                                        f"• *Teléfono Técnico:* {tec_tel}\n"
                                         f"• *Dirección:* {direccion}\n\n"
-                                        f"Nuestro equipo técnico estará puntual en tu ubicación. ¡Gracias por confiar en UT TEKVO!"
+                                        f"📞 *Atención y Soporte:* Toda comunicación, cambio o solicitud sobre tu servicio debe realizarse directamente a través de la administración: {adm_tel}.\n\n"
+                                        f"Nuestro personal técnico estará puntual en tu ubicación. ¡Gracias por confiar en UT TEKVO!"
                                     )
                                 else:
                                     reply_msg = (
                                         f"⚠️ Hola {cli_nom}, tu cita para *{titulo}* programada para el {fecha_fmt} ha sido registrada como *CANCELADA*.\n\n"
-                                        f"El administrador de UT TEKVO y el técnico asignado ({tec_nom}) han sido notificados."
+                                        f"📞 Si deseas reprogramar el servicio o tienes alguna inquietud, comunícate directamente con la administración de UT TEKVO al {adm_tel}."
                                     )
                             send_waha_text(sender_phone, reply_msg)
 
@@ -2145,7 +2154,12 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                                     cita_id, titulo, fecha_fmt, cli_nom, cli_tel, tec_nom, tec_tel, adm_tel, direccion = rows_csat[0]
                                     con.run("UPDATE citas SET calificacion = :score, updated_at = NOW() WHERE id = :id", score=score, id=cita_id)
                                     con.close()
-                                    send_waha_text(cli_tel, f"🙌 ¡Muchas gracias por tu calificación de {score}/5 ⭐!\nEn UT TEKVO valoramos tu opinión para seguir brindando el mejor servicio.")
+                                    send_waha_text(
+                                        cli_tel,
+                                        f"🙌 ¡Muchas gracias por tu calificación de {score}/5 ⭐!\n"
+                                        f"En UT TEKVO valoramos tu opinión para seguir brindando el mejor servicio.\n\n"
+                                        f"📞 Para nuevos requerimientos o soporte, comunícate con nuestra administración al {adm_tel}."
+                                    )
                                     send_waha_text(tec_tel, f"⭐ *Calificación de Cliente - UT TEKVO*\n\nEl cliente {cli_nom} ha calificado tu servicio en *{titulo}* con *{score}/5 ⭐*.")
                                     
                                     stars_bar = "⭐" * score

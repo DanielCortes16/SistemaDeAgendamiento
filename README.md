@@ -273,7 +273,9 @@ En las versiones modernas de WhatsApp Web / Multi-Device, cuando un usuario pres
 3. Obtiene el número en formato internacional normalizado (ej. `+573154569189`).
 4. Consulta la base de datos PostgreSQL para identificar si el votante es el **Cliente** o el **Técnico**.
 5. Actualiza la columna correspondiente (`confirmacion_cliente` o `confirmacion_tecnico`).
-6. **Comprobante Detallado a Quien Responde:** El votante (técnico o cliente) recibe un comprobante inmediato con los datos completos de la cita: servicio, fecha y hora, nombre y teléfono de la contraparte, dirección exacta y notas técnicas.
+6. **Comprobante Detallado a Quien Responde:**
+   - **Técnico:** Recibe comprobante con datos completos de la cita: servicio, fecha y hora, nombre y teléfono del cliente, dirección exacta y notas técnicas para coordinar la llegada.
+   - **Cliente:** Recibe comprobante con datos del servicio, fecha y hora, nombre del técnico asignado, dirección y la **línea directa de la administración**, ocultando intencionalmente el número de WhatsApp del técnico para garantizar que toda la comunicación, cambios o consultas pasen obligatoriamente por el administrador.
 7. **Notificación Clara al Administrador:** El administrador recibe un reporte estructurado e inequívoco con el ID de la cita, servicio, dirección, quién respondió y su teléfono, más el **estado en vivo de ambas partes** (ej. `Cliente ➔ ✅ CONFIRMADA | Técnico ➔ ⏳ PENDIENTE`) y la guía de acción correspondiente.
 8. **Transición y Encuesta de Inicio:** Si ambos confirman, la cita transiciona automáticamente a estado `CONFIRMADA` y se despacha de inmediato al técnico la encuesta `[▶️ Iniciar Labor]` con la dirección del servicio.
 9. **Ejecución en Progreso:** Al presionar `[▶️ Iniciar Labor]`, se registra `fecha_inicio_real = NOW()`, el estado pasa a `EN_PROGRESO`, se notifica al cliente que el técnico comenzó labores, se avisa al administrador y se le envía al técnico el botón `[⏹️ Finalizar Labor]`.
