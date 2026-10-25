@@ -1918,22 +1918,34 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                             # Notificar al técnico
                             send_waha_text(tec_tel, f"⭐ *Calificación de Cliente - UT TEKVO*\n\nEl cliente {cli_nom} ha calificado tu servicio en *{titulo}* con *{score}/5 ⭐*.")
 
-                            # Notificar al administrador (Alerta roja si <= 2)
+                            # Notificar al administrador con reporte completo
+                            stars_bar = "⭐" * score
                             if score <= 2:
-                                adm_alert = (
-                                    f"🚨 *ALERTA CSAT BAJO - UT TEKVO*\n\n"
-                                    f"El cliente *{cli_nom}* ({cli_tel}) calificó con *{score}/5 ⭐* el servicio *{titulo}* atendido por {tec_nom}.\n"
-                                    f"📍 Dirección: {direccion}\n"
-                                    f"👉 *Atención Inmediata:* Se sugiere contactar al cliente para seguimiento y control de calidad."
-                                )
+                                header_csat = "🚨 *ALERTA CSAT BAJO (Calificación Negativa) - UT TEKVO*"
+                                guia_csat = "👉 *Atención Inmediata:* Se sugiere contactar al cliente de inmediato para seguimiento y atención de garantía / calidad."
+                            elif score == 3:
+                                header_csat = "⚠️ *Calificación Regular Recibida - UT TEKVO*"
+                                guia_csat = "👉 Se recomienda revisar posibles oportunidades de mejora en el servicio con el técnico."
                             else:
-                                adm_alert = (
-                                    f"⭐ *Nueva Calificación Recibida - UT TEKVO*\n\n"
-                                    f"- Servicio: *{titulo}*\n"
-                                    f"- Cliente: {cli_nom}\n"
-                                    f"- Técnico: {tec_nom}\n"
-                                    f"- Calificación: *{score}/5 ⭐*"
-                                )
+                                header_csat = "⭐ *Nueva Calificación Positiva Recibida - UT TEKVO*"
+                                guia_csat = "👉 ¡Cliente satisfecho con la atención técnica brindada!"
+
+                            adm_alert = (
+                                f"{header_csat}\n\n"
+                                f"📋 *Datos del Servicio:*\n"
+                                f"• *ID:* `{str(cita_id)[:8]}`\n"
+                                f"• *Servicio:* *{titulo}*\n"
+                                f"• *Fecha:* {fecha_fmt}\n"
+                                f"• *Dirección:* {direccion}\n\n"
+                                f"👤 *Cliente Calificador:*\n"
+                                f"• *Nombre:* *{cli_nom}*\n"
+                                f"• *Teléfono:* {cli_tel}\n\n"
+                                f"🔧 *Técnico Responsable:*\n"
+                                f"• *Nombre:* *{tec_nom}*\n"
+                                f"• *Teléfono:* {tec_tel}\n\n"
+                                f"⭐ *Puntuación Otorgada:* {stars_bar} *({score}/5)*\n\n"
+                                f"{guia_csat}"
+                            )
                             send_waha_text(adm_tel, adm_alert)
                             print(f"[CSAT Registrado] Cita {cita_id} calificada con {score}/5 por {cli_nom}", flush=True)
                         else:
@@ -2109,11 +2121,12 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                             print(f"[Admin Alert Sent] to {adm_tel}: {admin_alert[:60]}...", flush=True)
 
                         else:
-                            # Fallback: si envió "1" o "2", verificar si es CSAT para cita completada
-                            if body_text in ["1", "2"]:
+                            # Fallback: si envió un número de 1 a 5 por texto libre, verificar si es CSAT para cita completada
+                            if body_text in ["1", "2", "3", "4", "5"]:
                                 score = int(body_text)
                                 rows_csat = con.run("""
                                     SELECT c.id, c.titulo,
+                                           TO_CHAR(c.fecha_inicio AT TIME ZONE 'America/Bogota', 'YYYY-MM-DD HH24:MI') AS fecha_fmt,
                                            cli.nombre AS cli_nom, cli.telefono_whatsapp AS cli_tel,
                                            tec.nombre AS tec_nom, tec.telefono_whatsapp AS tec_tel,
                                            COALESCE(adm.telefono_whatsapp, '+573118198511') AS adm_tel,
@@ -2129,16 +2142,38 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                                     LIMIT 1
                                 """, p=clean_p)
                                 if rows_csat:
-                                    cita_id, titulo, cli_nom, cli_tel, tec_nom, tec_tel, adm_tel, direccion = rows_csat[0]
+                                    cita_id, titulo, fecha_fmt, cli_nom, cli_tel, tec_nom, tec_tel, adm_tel, direccion = rows_csat[0]
                                     con.run("UPDATE citas SET calificacion = :score, updated_at = NOW() WHERE id = :id", score=score, id=cita_id)
                                     con.close()
                                     send_waha_text(cli_tel, f"🙌 ¡Muchas gracias por tu calificación de {score}/5 ⭐!\nEn UT TEKVO valoramos tu opinión para seguir brindando el mejor servicio.")
                                     send_waha_text(tec_tel, f"⭐ *Calificación de Cliente - UT TEKVO*\n\nEl cliente {cli_nom} ha calificado tu servicio en *{titulo}* con *{score}/5 ⭐*.")
+                                    
+                                    stars_bar = "⭐" * score
+                                    if score <= 2:
+                                        header_csat = "🚨 *ALERTA CSAT BAJO (Calificación Negativa) - UT TEKVO*"
+                                        guia_csat = "👉 *Atención Inmediata:* Se sugiere contactar al cliente de inmediato para seguimiento y atención de garantía / calidad."
+                                    elif score == 3:
+                                        header_csat = "⚠️ *Calificación Regular Recibida - UT TEKVO*"
+                                        guia_csat = "👉 Se recomienda revisar posibles oportunidades de mejora en el servicio con el técnico."
+                                    else:
+                                        header_csat = "⭐ *Nueva Calificación Positiva Recibida - UT TEKVO*"
+                                        guia_csat = "👉 ¡Cliente satisfecho con la atención técnica brindada!"
+
                                     adm_alert = (
-                                        f"🚨 *ALERTA CSAT BAJO - UT TEKVO*\n\n"
-                                        f"El cliente *{cli_nom}* ({cli_tel}) calificó con *{score}/5 ⭐* el servicio *{titulo}* atendido por {tec_nom}.\n"
-                                        f"📍 Dirección: {direccion}\n"
-                                        f"👉 *Atención Inmediata:* Se sugiere contactar al cliente para seguimiento y control de calidad."
+                                        f"{header_csat}\n\n"
+                                        f"📋 *Datos del Servicio:*\n"
+                                        f"• *ID:* `{str(cita_id)[:8]}`\n"
+                                        f"• *Servicio:* *{titulo}*\n"
+                                        f"• *Fecha:* {fecha_fmt}\n"
+                                        f"• *Dirección:* {direccion}\n\n"
+                                        f"👤 *Cliente Calificador:*\n"
+                                        f"• *Nombre:* *{cli_nom}*\n"
+                                        f"• *Teléfono:* {cli_tel}\n\n"
+                                        f"🔧 *Técnico Responsable:*\n"
+                                        f"• *Nombre:* *{tec_nom}*\n"
+                                        f"• *Teléfono:* {tec_tel}\n\n"
+                                        f"⭐ *Puntuación Otorgada:* {stars_bar} *({score}/5)*\n\n"
+                                        f"{guia_csat}"
                                     )
                                     send_waha_text(adm_tel, adm_alert)
                                     print(f"[CSAT Fallback Registrado] Cita {cita_id} calificada con {score}/5 por {cli_nom}", flush=True)
