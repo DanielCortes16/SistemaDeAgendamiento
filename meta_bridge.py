@@ -324,6 +324,34 @@ def delete_cita_by_id(cita_id):
         return False, str(e)
 
 
+def delete_citas_anteriores(fecha_limite):
+    """
+    Elimina todas las citas cuya fecha_inicio sea estrictamente anterior a fecha_limite (en zona horaria de Bogotá).
+    """
+    try:
+        dt = datetime.strptime(fecha_limite.strip(), "%Y-%m-%d")
+        fecha_limite_fmt = dt.strftime("%Y-%m-%d")
+        con = get_db()
+        count_rows = con.run(
+            "SELECT COUNT(*) FROM citas WHERE (fecha_inicio AT TIME ZONE 'America/Bogota')::date < :lim::date",
+            lim=fecha_limite_fmt
+        )
+        total = count_rows[0][0] if count_rows else 0
+        if total == 0:
+            con.close()
+            return True, f"No se encontraron citas con fecha anterior al {fecha_limite_fmt}."
+
+        con.run(
+            "DELETE FROM citas WHERE (fecha_inicio AT TIME ZONE 'America/Bogota')::date < :lim::date",
+            lim=fecha_limite_fmt
+        )
+        con.close()
+        return True, f"Se han eliminado exitosamente {total} cita(s) con fecha anterior al {fecha_limite_fmt}."
+    except Exception as e:
+        print(f"[Meta Bridge DB Purge Error] {e}", flush=True)
+        return False, f"Error al purgar citas: {str(e)}"
+
+
 def delete_tecnico_by_id(tecnico_id):
     try:
         con = get_db()
@@ -570,7 +598,7 @@ def render_whatsapp_page(status, me=None):
 </html>"""
 
 
-def render_agendar_page(success_data=None, error_msg=None, filters=None):
+def render_agendar_page(success_data=None, error_msg=None, info_msg=None, filters=None):
     if filters is None:
         filters = {}
     tecnicos, citas, clientes_list, admin_tel = fetch_tecnicos_and_citas(filters)
@@ -605,7 +633,12 @@ def render_agendar_page(success_data=None, error_msg=None, filters=None):
                 "reciente": True,
             })
 
-    tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    today_dt = datetime.now()
+    today_date = today_dt.strftime("%Y-%m-%d")
+    tomorrow = (today_dt + timedelta(days=1)).strftime("%Y-%m-%d")
+    first_of_this_month = today_dt.strftime("%Y-%m-01")
+    first_prev_month = (today_dt.replace(day=1) - timedelta(days=1)).strftime("%Y-%m-01")
+    first_two_months_ago = (today_dt.replace(day=1) - timedelta(days=40)).strftime("%Y-%m-01")
 
     wa_status, _ = get_waha_session_status()
     if wa_status == "WORKING":
@@ -720,6 +753,12 @@ def render_agendar_page(success_data=None, error_msg=None, filters=None):
             <strong>⚠️ {html.escape(error_msg)}</strong>
         </div>
         """
+    elif info_msg:
+        alert_banner = f"""
+        <div style="background:#ecfdf5;border-left:4px solid #10b981;padding:16px;border-radius:8px;margin-bottom:20px;color:#065f46;font-size:14px;font-weight:600;">
+            ✅ {html.escape(info_msg)}
+        </div>
+        """
     elif success_data:
         alert_banner = f"""
         <div style="background:#ecfdf5;border:2px solid #10b981;padding:20px;border-radius:12px;margin-bottom:24px;color:#065f46;">
@@ -780,6 +819,10 @@ def render_agendar_page(success_data=None, error_msg=None, filters=None):
         .btn-reset:hover {{ background: #e2e8f0; color: #1e293b; }}
         .btn-excel {{ background: #107c41; color: #fff; border: none; padding: 11px 18px; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 14px; text-decoration: none; display: inline-flex; align-items: center; gap: 8px; box-shadow: 0 2px 6px rgba(16, 124, 65, 0.3); transition: all 0.2s; }}
         .btn-excel:hover {{ background: #0c6133; transform: translateY(-1px); color: #fff; }}
+        .btn-purge {{ background: #fff1f2; color: #be123c; border: 1px solid #fecdd3; padding: 11px 16px; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 14px; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; box-shadow: 0 1px 3px rgba(190, 18, 60, 0.1); transition: all 0.2s; }}
+        .btn-purge:hover {{ background: #ffe4e6; color: #9f1239; transform: translateY(-1px); }}
+        .btn-preset {{ background: #f8fafc; border: 1px solid #cbd5e1; padding: 5px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; color: #475569; font-weight: 600; transition: background 0.15s; }}
+        .btn-preset:hover {{ background: #e2e8f0; color: #0f172a; }}
         .table-header-flex {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }}
         
         /* Tabla */
@@ -903,9 +946,14 @@ def render_agendar_page(success_data=None, error_msg=None, filters=None):
                 <h2 style="margin:0;font-size:19px;color:#0f172a;">📋 Citas Programadas y Estado en Vivo</h2>
                 <div style="font-size:13px;color:#64748b;margin-top:2px;">Mostrando {len(citas)} citas registradas</div>
             </div>
-            <a href="{html.escape(excel_export_url)}" class="btn-excel" title="Descargar citas filtradas en formato Microsoft Excel">
-                📊 Exportar a Excel (.xlsx)
-            </a>
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+                <button type="button" onclick="openPurgeModal()" class="btn-purge" title="Eliminar citas de meses o fechas anteriores">
+                    🗑️ Purgar Citas Antiguas
+                </button>
+                <a href="{html.escape(excel_export_url)}" class="btn-excel" title="Descargar citas filtradas en formato Microsoft Excel">
+                    📊 Exportar a Excel (.xlsx)
+                </a>
+            </div>
         </div>
 
         <!-- Panel de Filtros -->
@@ -1035,7 +1083,65 @@ def render_agendar_page(success_data=None, error_msg=None, filters=None):
     </div>
 </div>
 
+<!-- Modal de Purga / Eliminación de Citas Antiguas -->
+<div class="modal-overlay" id="purgeModal">
+    <div class="modal-box" style="max-width:480px;">
+        <h3 class="modal-title" style="color:#be123c;">🗑️ Eliminar Citas por Fecha hacia Atrás</h3>
+        <p class="modal-desc" style="color:#475569;margin-bottom:14px;">
+            Elimina permanentemente de la base de datos todas las citas registradas con fecha <strong>anterior</strong> a la fecha límite que selecciones.
+        </p>
+        <form method="POST" action="/agendar/citas/purgar" id="purgeForm" onsubmit="return validatePurgeForm()">
+            <div class="form-group" style="margin-bottom:12px;">
+                <label style="font-weight:600;font-size:13px;color:#1e293b;margin-bottom:6px;display:block;">
+                    📅 Eliminar todas las citas anteriores al día:
+                </label>
+                <input type="date" name="fecha_limite" id="fechaLimiteInput" required 
+                       value="{first_of_this_month}" max="{today_date}"
+                       style="width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:15px;background:#fff;">
+            </div>
+            
+            <div style="margin-bottom:16px;">
+                <label style="font-size:12px;font-weight:600;color:#64748b;margin-bottom:6px;display:block;">Accesos rápidos:</label>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    <button type="button" class="btn-preset" onclick="setPurgeDate('{first_of_this_month}')">🗓️ Inicio de este mes ({first_of_this_month})</button>
+                    <button type="button" class="btn-preset" onclick="setPurgeDate('{first_prev_month}')">🗓️ Mes anterior ({first_prev_month})</button>
+                    <button type="button" class="btn-preset" onclick="setPurgeDate('{first_two_months_ago}')">🗓️ Hace 2 meses ({first_two_months_ago})</button>
+                </div>
+            </div>
+
+            <div style="background:#fff1f2;border:1px solid #fecdd3;padding:12px;border-radius:8px;margin-bottom:18px;font-size:13px;color:#9f1239;">
+                ⚠️ <strong>Advertencia irreversible:</strong> Se borrarán definitivamente todas las citas anteriores a esa fecha, junto con su historial de notificaciones.
+            </div>
+
+            <div class="modal-actions">
+                <button type="button" class="btn-modal-cancel" onclick="closePurgeModal()">Cancelar</button>
+                <button type="submit" class="btn-modal-confirm" style="background:#be123c;">Sí, Purgar Citas Antiguas</button>
+            </div>
+        </form>
+    </div>
+</div>
+
 <script>
+function openPurgeModal() {{
+    document.getElementById('purgeModal').style.display = 'flex';
+}}
+
+function closePurgeModal() {{
+    document.getElementById('purgeModal').style.display = 'none';
+}}
+
+function setPurgeDate(d) {{
+    document.getElementById('fechaLimiteInput').value = d;
+}}
+
+function validatePurgeForm() {{
+    var val = document.getElementById('fechaLimiteInput').value;
+    if (!val) {{
+        alert('Por favor selecciona una fecha límite.');
+        return false;
+    }}
+    return confirm('⚠️ ¿Estás completamente seguro de que deseas eliminar todas las citas anteriores al ' + val + '?\\n\\nEsta acción es irreversible y borrará el historial de esas fechas.');
+}}
 function toggleNewTech(val) {{
     var box = document.getElementById('new_tech_box');
     var nameInput = document.getElementById('nuevo_tecnico_nombre');
@@ -1087,6 +1193,7 @@ window.addEventListener('keydown', function(e) {{
         closeDeleteModal();
         closeDeleteTecModal();
         closeTechModal();
+        closePurgeModal();
     }}
 }});
 document.getElementById('deleteModal').addEventListener('click', function(e) {{
@@ -1097,6 +1204,9 @@ document.getElementById('techModal').addEventListener('click', function(e) {{
 }});
 document.getElementById('deleteTecModal').addEventListener('click', function(e) {{
     if (e.target === this) closeDeleteTecModal();
+}});
+document.getElementById('purgeModal').addEventListener('click', function(e) {{
+    if (e.target === this) closePurgeModal();
 }});
 
 // Formateo y validación de números de WhatsApp
@@ -1333,6 +1443,7 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                 err_del = q.get("error", [""])[0].strip()
                 page = render_agendar_page(
                     error_msg=err_del if err_del else None,
+                    info_msg=msg_del if msg_del else None,
                     filters=filters
                 ).encode("utf-8")
             self.send_response(200)
@@ -1432,6 +1543,14 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             self.handle_eliminar_submit()
+            return
+        if parsed.path == "/agendar/citas/purgar":
+            if not self.is_authenticated():
+                self.send_response(302)
+                self.send_header("Location", "/agendar")
+                self.end_headers()
+                return
+            self.handle_purgar_citas_submit()
             return
         if parsed.path == "/agendar/tecnicos/eliminar":
             if not self.is_authenticated():
@@ -1650,6 +1769,27 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
             redirect_url = "/agendar" if ok else "/agendar?error=" + urllib.parse.quote(msg)
             self.send_response(302)
             self.send_header("Location", redirect_url)
+            self.end_headers()
+        except Exception as e:
+            self.send_response(302)
+            self.send_header("Location", "/agendar?error=" + urllib.parse.quote(str(e)))
+            self.end_headers()
+
+    def handle_purgar_citas_submit(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            raw_post = self.rfile.read(content_length).decode("utf-8")
+            form = urllib.parse.parse_qs(raw_post)
+            fecha_limite = form.get("fecha_limite", [""])[0].strip()
+            if not fecha_limite:
+                self.send_response(302)
+                self.send_header("Location", "/agendar?error=" + urllib.parse.quote("Debes seleccionar una fecha límite."))
+                self.end_headers()
+                return
+            ok, msg = delete_citas_anteriores(fecha_limite)
+            param = "msg=" if ok else "error="
+            self.send_response(302)
+            self.send_header("Location", f"/agendar?{param}" + urllib.parse.quote(msg))
             self.end_headers()
         except Exception as e:
             self.send_response(302)
