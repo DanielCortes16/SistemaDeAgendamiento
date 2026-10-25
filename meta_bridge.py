@@ -282,12 +282,12 @@ def fetch_tecnicos_and_citas(filters=None):
             "TO_CHAR(c.fecha_fin AT TIME ZONE 'America/Bogota', 'YYYY-MM-DD HH24:MI') AS f_fin, "
             "c.estado, c.confirmacion_cliente, c.confirmacion_tecnico, "
             "cli.nombre, cli.telefono_whatsapp, tec.nombre, tec.telefono_whatsapp, "
-            "c.direccion_servicio, c.descripcion "
+            "c.direccion_servicio, c.descripcion, c.microsoft_event_id "
             "FROM citas c "
             "JOIN usuarios cli ON c.cliente_id = cli.id "
             "JOIN usuarios tec ON c.tecnico_id = tec.id "
             f"{where_sql} "
-            "ORDER BY c.fecha_inicio DESC LIMIT 200"
+            "ORDER BY c.created_at DESC LIMIT 200"
         )
         rows_citas = con.run(sql_citas, **params)
         for r in rows_citas:
@@ -305,6 +305,7 @@ def fetch_tecnicos_and_citas(filters=None):
                 "tec_tel": r[10],
                 "direccion": r[11],
                 "descripcion": r[12] or "",
+                "microsoft_event_id": r[13] or "",
             })
         con.close()
     except Exception as e:
@@ -573,6 +574,37 @@ def render_agendar_page(success_data=None, error_msg=None, filters=None):
     if filters is None:
         filters = {}
     tecnicos, citas, clientes_list, admin_tel = fetch_tecnicos_and_citas(filters)
+
+    # Si acabamos de agendar una cita, asegurar que esté al inicio de la tabla y destacada
+    recent_mid = success_data.get("microsoft_event_id") if success_data else None
+    if recent_mid:
+        found_in_list = False
+        for c in citas:
+            if c.get("microsoft_event_id") == recent_mid:
+                c["reciente"] = True
+                found_in_list = True
+                citas.remove(c)
+                citas.insert(0, c)
+                break
+        if not found_in_list and success_data:
+            citas.insert(0, {
+                "id": "",
+                "titulo": success_data["titulo"],
+                "fecha": success_data.get("fecha_label", ""),
+                "fecha_fin": "",
+                "estado": "PENDIENTE",
+                "conf_cli": "PENDIENTE",
+                "conf_tec": "PENDIENTE",
+                "cliente": success_data["cliente_nombre"],
+                "cli_tel": success_data["cliente_telefono"],
+                "tecnico": success_data["tecnico_nombre"],
+                "tec_tel": "",
+                "direccion": "",
+                "descripcion": "",
+                "microsoft_event_id": recent_mid,
+                "reciente": True,
+            })
+
     tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
     wa_status, _ = get_waha_session_status()
@@ -642,10 +674,21 @@ def render_agendar_page(success_data=None, error_msg=None, filters=None):
         c_titulo_escaped = html.escape(c['titulo']).replace("'", "\\'")
         c_cliente_escaped = html.escape(c['cliente']).replace("'", "\\'")
 
+        is_recent = c.get("reciente", False)
+        row_style = 'style="background:#f0fdf4;border-left:4px solid #10b981;"' if is_recent else ''
+        recent_badge = ' <span style="background:#10b981;color:#fff;font-size:10px;padding:2px 6px;border-radius:10px;font-weight:700;">✨ Recién Creada</span>' if is_recent else ''
+
+        del_btn_html = ""
+        if c.get('id'):
+            del_btn_html = f"""<button type="button" class="btn-del" title="Eliminar cita"
+                        onclick="confirmDeleteCita('{html.escape(c['id'])}', '{c_titulo_escaped}', '{c_cliente_escaped}', '{html.escape(c['fecha'])}')">
+                    🗑️
+                </button>"""
+
         citas_rows_html += f"""
-        <tr>
+        <tr {row_style}>
             <td>
-                <strong>{html.escape(c['titulo'])}</strong><br>
+                <strong>{html.escape(c['titulo'])}</strong>{recent_badge}<br>
                 <small style="color:#64748b">🗓️ {html.escape(c['fecha'])}</small>
             </td>
             <td>
@@ -665,10 +708,7 @@ def render_agendar_page(success_data=None, error_msg=None, filters=None):
                 </div>
             </td>
             <td style="text-align:center;">
-                <button type="button" class="btn-del" title="Eliminar cita"
-                        onclick="confirmDeleteCita('{html.escape(c['id'])}', '{c_titulo_escaped}', '{c_cliente_escaped}', '{html.escape(c['fecha'])}')">
-                    🗑️
-                </button>
+                {del_btn_html}
             </td>
         </tr>
         """
@@ -1679,6 +1719,7 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
             fecha_inicio_iso = f"{fecha}T{hora_inicio}:00-05:00"
             fecha_fin_iso = f"{fecha}T{hora_fin}:00-05:00"
 
+            ms_event_id = f"WEB-{uuid.uuid4().hex[:8].upper()}"
             payload = {
                 "titulo": titulo,
                 "descripcion": descripcion,
@@ -1690,7 +1731,7 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                 "tecnico_nombre": tecnico_nombre,
                 "tecnico_email": tecnico_email,
                 "admin_email": "servicio@tekvo.co",
-                "microsoft_event_id": f"WEB-{uuid.uuid4().hex[:8].upper()}",
+                "microsoft_event_id": ms_event_id,
             }
 
             req = urllib.request.Request(
@@ -1699,8 +1740,70 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=15) as _:
-                pass
+            try:
+                with urllib.request.urlopen(req, timeout=15) as _:
+                    pass
+            except Exception as e:
+                print(f"[Meta Bridge] Error llamando webhook de n8n: {e}", flush=True)
+
+            # Sincronización activa: esperar a que n8n complete la inserción en PostgreSQL (máx 3.0s, chequeo cada 40ms)
+            cita_confirmada_db = False
+            start_wait = time.time()
+            while time.time() - start_wait < 3.0:
+                try:
+                    con_chk = get_db()
+                    chk = con_chk.run("SELECT id FROM citas WHERE microsoft_event_id = :mid", mid=ms_event_id)
+                    con_chk.close()
+                    if chk:
+                        cita_confirmada_db = True
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.04)
+
+            # Si n8n tardó o falló, asegurar la inserción directa en PostgreSQL para que figure inmediatamente
+            if not cita_confirmada_db:
+                print(f"[Meta Bridge Fallback] Insertando cita directamente en PostgreSQL para {ms_event_id}...", flush=True)
+                try:
+                    con_fb = get_db()
+                    digits_cli = "".join(c for c in cliente_telefono if c.isdigit())
+                    cli_email = f"cli_{digits_cli}@cliente.com"
+                    con_fb.run(
+                        "INSERT INTO usuarios (nombre, email, telefono_whatsapp, rol) "
+                        "VALUES (:n, :e, :t, 'CLIENTE') "
+                        "ON CONFLICT (email) DO UPDATE SET nombre = EXCLUDED.nombre, telefono_whatsapp = EXCLUDED.telefono_whatsapp",
+                        n=cliente_nombre, e=cli_email, t=cliente_telefono
+                    )
+                    cli_row = con_fb.run("SELECT id FROM usuarios WHERE email = :e", e=cli_email)
+                    cli_id = cli_row[0][0] if cli_row else None
+
+                    tec_row = con_fb.run(
+                        "SELECT id FROM usuarios WHERE rol = 'TECNICO' AND activo = true "
+                        "ORDER BY CASE WHEN email = :e THEN 1 WHEN LOWER(nombre) = LOWER(:n) THEN 2 ELSE 3 END ASC LIMIT 1",
+                        e=tecnico_email, n=tecnico_nombre
+                    )
+                    tec_id = tec_row[0][0] if tec_row else None
+
+                    adm_row = con_fb.run("SELECT id FROM usuarios WHERE rol = 'ADMINISTRADOR' AND activo = true LIMIT 1")
+                    adm_id = adm_row[0][0] if adm_row else None
+
+                    if cli_id and tec_id:
+                        con_fb.run(
+                            "INSERT INTO citas (cliente_id, tecnico_id, admin_id, titulo, descripcion, direccion_servicio, "
+                            "fecha_inicio, fecha_fin, estado, microsoft_event_id, confirmacion_cliente, confirmacion_tecnico, "
+                            "recordatorio_24h_enviado, recordatorio_cliente_enviado, recordatorio_tecnico_enviado, recordatorio_enviado_at) "
+                            "VALUES (:cli_id, :tec_id, :adm_id, :tit, :desc, :dir, :fi::timestamptz, :ff::timestamptz, "
+                            "'PENDIENTE', :mid, 'PENDIENTE', 'PENDIENTE', "
+                            "CASE WHEN :fi::timestamptz <= (NOW() + INTERVAL '24 hours') THEN TRUE ELSE FALSE END, "
+                            "CASE WHEN :fi::timestamptz <= (NOW() + INTERVAL '24 hours') THEN TRUE ELSE FALSE END, "
+                            "CASE WHEN :fi::timestamptz <= (NOW() + INTERVAL '24 hours') THEN TRUE ELSE FALSE END, "
+                            "CASE WHEN :fi::timestamptz <= (NOW() + INTERVAL '24 hours') THEN NOW() ELSE NULL END)",
+                            cli_id=cli_id, tec_id=tec_id, adm_id=adm_id, tit=titulo, desc=descripcion, dir=direccion,
+                            fi=fecha_inicio_iso, ff=fecha_fin_iso, mid=ms_event_id
+                        )
+                    con_fb.close()
+                except Exception as fb_err:
+                    print(f"[Meta Bridge Fallback Error] {fb_err}", flush=True)
 
             cal_body = (
                 f"Cliente: {cliente_nombre}\n"
@@ -1739,6 +1842,7 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                 "fecha_label": f"{fecha} ({hora_inicio} a {hora_fin})",
                 "outlook_url": outlook_url,
                 "ics_url": ics_url,
+                "microsoft_event_id": ms_event_id,
             }
             page = render_agendar_page(success_data=success_data).encode("utf-8")
             self.send_response(200)
