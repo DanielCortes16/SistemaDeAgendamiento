@@ -821,7 +821,15 @@ def render_agendar_page(success_data=None, error_msg=None, filters=None):
         <form method="POST" action="/agendar">
             <div class="form-group">
                 <label>Título o Servicio a Realizar *</label>
-                <input type="text" name="titulo" required placeholder="Ej: Instalación Cámara de Seguridad / Mantenimiento">
+                <select name="titulo" id="titulo" required>
+                    <option value="" disabled selected>-- Seleccione el tipo de servicio --</option>
+                    <option value="M.P (Preventivo)">M.P (Preventivo)</option>
+                    <option value="M.C (Correctivo)">M.C (Correctivo)</option>
+                    <option value="D. (Diagnostico)">D. (Diagnostico)</option>
+                    <option value="V.T (Visita Tecnica)">V.T (Visita Tecnica)</option>
+                    <option value="I. (Instalacion)">I. (Instalacion)</option>
+                    <option value="R. (Repuesto)">R. (Repuesto)</option>
+                </select>
             </div>
 
             <div class="grid">
