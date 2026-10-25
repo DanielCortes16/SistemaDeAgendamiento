@@ -1701,7 +1701,7 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                         if action == "CONFIRMAR":
                             reply_msg = f"🙌 ¡Muchas gracias! Tu respuesta para el servicio *{titulo}* ({fecha_fmt}) ha sido registrada exitosamente como CONFIRMADA."
                         else:
-                            reply_msg = f"⚠️ Tu respuesta para el servicio *{titulo}* ({fecha_fmt}) ha sido registrada como CANCELADA / NO DISPONIBLE. El administrador de Tekvo ha sido notificado."
+                            reply_msg = f"⚠️ Tu respuesta para el servicio *{titulo}* ({fecha_fmt}) ha sido registrada como CANCELADA / NO DISPONIBLE. El administrador de UT TEKVO ha sido notificado."
                         send_waha_text(sender_phone, reply_msg)
 
                         if rol == "CLIENTE" and action == "CANCELAR":
@@ -1709,7 +1709,7 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                             send_waha_text(tec_tel, tec_alert)
 
                         admin_alert = (
-                            f"🔔 *Actualización de Cita Tekvo*\n\n"
+                            f"🔔 *Actualización de Cita UT TEKVO*\n\n"
                             f"- Cita: *{titulo}* ({fecha_fmt})\n"
                             f"- Quien respondió: {cli_nom if rol == 'CLIENTE' else tec_nom} ({rol})\n"
                             f"- Respuesta: {'✅ CONFIRMADO' if action == 'CONFIRMAR' else '❌ CANCELADO'}\n"
