@@ -232,6 +232,11 @@ def send_waha_poll(phone, poll_name, options):
         # WhatsApp limit is 255 characters for poll title
         if len(poll_name) > 250:
             poll_name = poll_name[:247] + "..."
+        # WhatsApp strictly requires at least 2 options in polls
+        if not options or len(options) == 0:
+            options = ["✅ Sí", "❌ No"]
+        elif len(options) == 1:
+            options = [options[0], "⏳ Más tarde"]
         payload = {
             "session": "default",
             "chatId": chat_id,
@@ -1746,13 +1751,21 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                         hora_inicio = datetime.now(bogota_tz).strftime("%I:%M %p")
 
                         # 1. Responder al técnico
-                        tec_msg = f"⏱️ *Labor Iniciada con Éxito - UT TEKVO*\n\nServicio: *{titulo}*\nHora de inicio: *{hora_inicio}*.\n¡Muchos éxitos en la labor!"
+                        tec_msg = (
+                            f"⏱️ *Labor Iniciada con Éxito - UT TEKVO*\n\n"
+                            f"• *Servicio:* *{titulo}*\n"
+                            f"• *Cliente:* {cli_nom} ({cli_tel})\n"
+                            f"• *Dirección:* {direccion}\n"
+                            f"• *Hora de Inicio:* {hora_inicio}\n\n"
+                            f"¡Muchos éxitos en la labor!"
+                        )
                         send_waha_text(tec_tel, tec_msg)
 
                         # 2. Enviar encuesta interactiva para finalizar labor
-                        poll_tit = (titulo[:55] + "...") if len(titulo) > 55 else titulo
-                        fin_poll_name = f"🛠️ *UT TEKVO - Finalizar Labor*\n\nServicio en curso: *{poll_tit}*.\nPresiona al culminar:"
-                        send_waha_poll(tec_tel, fin_poll_name, ["⏹️ Finalizar Labor"])
+                        poll_tit = (titulo[:45] + "...") if len(titulo) > 45 else titulo
+                        poll_cli = (cli_nom[:25] + "...") if len(cli_nom) > 25 else cli_nom
+                        fin_poll_name = f"🛠️ *UT TEKVO - Finalizar Labor*\n\nLabor en curso: *{poll_tit}* ({poll_cli}).\nPresiona al culminar:"
+                        send_waha_poll(tec_tel, fin_poll_name, ["⏹️ Finalizar Labor", "⏳ Sigo trabajando"])
 
                         # 3. Notificar al cliente
                         cli_msg = f"ℹ️ *Aviso UT TEKVO*\n\nHola {cli_nom}, tu técnico {tec_nom} ha *iniciado* la labor técnica en tu dirección para el servicio *{titulo}* ({hora_inicio})."
@@ -1761,12 +1774,13 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                         # 4. Notificar al administrador
                         admin_msg = (
                             f"⏳ *Labor en Progreso - UT TEKVO*\n\n"
-                            f"- Servicio: *{titulo}*\n"
-                            f"- Técnico: {tec_nom}\n"
-                            f"- Cliente: {cli_nom}\n"
-                            f"- Dirección: {direccion}\n"
-                            f"- Hora Inicio: {hora_inicio}\n"
-                            f"- Estado: EN_PROGRESO"
+                            f"• *ID:* `{str(cita_id)[:8]}`\n"
+                            f"• *Servicio:* *{titulo}*\n"
+                            f"• *Técnico:* {tec_nom} ({tec_tel})\n"
+                            f"• *Cliente:* {cli_nom} ({cli_tel})\n"
+                            f"• *Dirección:* {direccion}\n"
+                            f"• *Hora Inicio:* {hora_inicio}\n"
+                            f"• *Estado:* EN_PROGRESO"
                         )
                         send_waha_text(adm_tel, admin_msg)
                         print(f"[Labor Iniciada] Cita {cita_id} iniciada por {tec_nom}", flush=True)
@@ -1816,17 +1830,27 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                             duracion_str = f"{hrs}h {mins}m" if hrs > 0 else f"{mins} min"
 
                         # 1. Responder al técnico
-                        tec_msg = f"✅ *Labor Finalizada con Éxito - UT TEKVO*\n\nHas culminado el servicio *{titulo}*.\n⏱️ Duración total: *{duracion_str}*.\n¡Excelente trabajo!"
+                        tec_msg = (
+                            f"✅ *Labor Finalizada con Éxito - UT TEKVO*\n\n"
+                            f"• *Servicio:* *{titulo}*\n"
+                            f"• *Cliente:* {cli_nom}\n"
+                            f"• *Dirección:* {direccion}\n"
+                            f"• *Duración Real:* *{duracion_str}*\n\n"
+                            f"¡Excelente trabajo!"
+                        )
                         send_waha_text(tec_tel, tec_msg)
 
                         # 2. Notificar al administrador
                         admin_msg = (
                             f"🏁 *Labor Completada - UT TEKVO*\n\n"
-                            f"- Servicio: *{titulo}*\n"
-                            f"- Técnico: {tec_nom}\n"
-                            f"- Cliente: {cli_nom}\n"
-                            f"- Duración Real: *{duracion_str}*\n"
-                            f"- Estado: COMPLETADA"
+                            f"• *ID:* `{str(cita_id)[:8]}`\n"
+                            f"• *Servicio:* *{titulo}*\n"
+                            f"• *Técnico:* {tec_nom} ({tec_tel})\n"
+                            f"• *Cliente:* {cli_nom} ({cli_tel})\n"
+                            f"• *Dirección:* {direccion}\n"
+                            f"• *Duración Real:* *{duracion_str}*\n"
+                            f"• *Estado:* COMPLETADA\n\n"
+                            f"👉 Se envió automáticamente la encuesta de satisfacción CSAT al cliente."
                         )
                         send_waha_text(adm_tel, admin_msg)
 
@@ -1937,7 +1961,8 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                                    cli.nombre AS cli_nom, cli.telefono_whatsapp AS cli_tel,
                                    tec.nombre AS tec_nom, tec.telefono_whatsapp AS tec_tel,
                                    COALESCE(adm.telefono_whatsapp, '+573118198511') AS adm_tel,
-                                   CASE WHEN REGEXP_REPLACE(cli.telefono_whatsapp, '[^0-9]', '', 'g') = :p THEN 'CLIENTE' ELSE 'TECNICO' END AS rol
+                                   CASE WHEN REGEXP_REPLACE(cli.telefono_whatsapp, '[^0-9]', '', 'g') = :p THEN 'CLIENTE' ELSE 'TECNICO' END AS rol,
+                                   c.direccion_servicio, c.descripcion
                             FROM citas c
                             JOIN usuarios cli ON c.cliente_id = cli.id
                             JOIN usuarios tec ON c.tecnico_id = tec.id
@@ -1952,7 +1977,7 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
 
                         if rows:
                             r = rows[0]
-                            cita_id, titulo, fecha_fmt, estado_actual, conf_cli, conf_tec, cli_nom, cli_tel, tec_nom, tec_tel, adm_tel, rol = r
+                            cita_id, titulo, fecha_fmt, estado_actual, conf_cli, conf_tec, cli_nom, cli_tel, tec_nom, tec_tel, adm_tel, rol, direccion, descripcion = r
 
                             nuevo_estado = estado_actual
                             nuevo_conf_cli = conf_cli
@@ -1987,31 +2012,98 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                             """, cc=nuevo_conf_cli, ct=nuevo_conf_tec, est=nuevo_estado, mot=motivo, id=cita_id)
                             con.close()
 
-                            if action == "CONFIRMAR":
-                                reply_msg = f"🙌 ¡Muchas gracias! Tu respuesta para el servicio *{titulo}* ({fecha_fmt}) ha sido registrada exitosamente como CONFIRMADA."
-                            else:
-                                reply_msg = f"⚠️ Tu respuesta para el servicio *{titulo}* ({fecha_fmt}) ha sido registrada como CANCELADA / NO DISPONIBLE. El administrador de UT TEKVO ha sido notificado."
+                            if rol == "TECNICO":
+                                if action == "CONFIRMAR":
+                                    reply_msg = (
+                                        f"🙌 ¡Muchas gracias, {tec_nom}! Tu disponibilidad para la labor técnica ha sido registrada exitosamente como *CONFIRMADA*.\n\n"
+                                        f"📋 *Detalles de la Labor Asignada:*\n"
+                                        f"• *Servicio:* {titulo}\n"
+                                        f"• *Fecha y Hora:* {fecha_fmt}\n"
+                                        f"• *Cliente:* {cli_nom}\n"
+                                        f"• *Teléfono Cliente:* {cli_tel}\n"
+                                        f"• *Dirección:* {direccion}\n"
+                                    )
+                                    if descripcion:
+                                        reply_msg += f"• *Notas:* {descripcion}\n"
+                                    reply_msg += "\n¡Gracias por tu compromiso con el servicio de UT TEKVO!"
+                                else:
+                                    reply_msg = (
+                                        f"⚠️ Hola {tec_nom}, tu respuesta para el servicio *{titulo}* ({fecha_fmt}) con el cliente {cli_nom} ha sido registrada como *CANCELADA / NO DISPONIBLE*.\n\n"
+                                        f"El administrador de UT TEKVO ha sido notificado para reasignar la labor."
+                                    )
+                            else:  # CLIENTE
+                                if action == "CONFIRMAR":
+                                    reply_msg = (
+                                        f"🙌 ¡Muchas gracias, {cli_nom}! Tu asistencia ha sido registrada exitosamente como *CONFIRMADA*.\n\n"
+                                        f"📋 *Detalles de tu Cita:*\n"
+                                        f"• *Servicio:* {titulo}\n"
+                                        f"• *Fecha y Hora:* {fecha_fmt}\n"
+                                        f"• *Técnico Asignado:* {tec_nom}\n"
+                                        f"• *Teléfono Técnico:* {tec_tel}\n"
+                                        f"• *Dirección:* {direccion}\n\n"
+                                        f"Nuestro equipo técnico estará puntual en tu ubicación. ¡Gracias por confiar en UT TEKVO!"
+                                    )
+                                else:
+                                    reply_msg = (
+                                        f"⚠️ Hola {cli_nom}, tu cita para *{titulo}* programada para el {fecha_fmt} ha sido registrada como *CANCELADA*.\n\n"
+                                        f"El administrador de UT TEKVO y el técnico asignado ({tec_nom}) han sido notificados."
+                                    )
                             send_waha_text(sender_phone, reply_msg)
 
                             if rol == "CLIENTE" and action == "CANCELAR":
-                                tec_alert = f"⚠️ *Aviso de Cancelación*\n\nHola {tec_nom}, la cita de *{titulo}* programada para {fecha_fmt} con {cli_nom} ha sido CANCELADA por el cliente.\n\nTu agenda queda liberada en esa franja horaria."
+                                tec_alert = (
+                                    f"⚠️ *Aviso de Cancelación de Cita*\n\n"
+                                    f"Hola {tec_nom}, la cita de *{titulo}* programada para {fecha_fmt} con el cliente {cli_nom} ({cli_tel}) en {direccion} ha sido *CANCELADA* por el cliente.\n\n"
+                                    f"Tu agenda queda liberada en esa franja horaria."
+                                )
                                 send_waha_text(tec_tel, tec_alert)
 
+                            quien_nom = cli_nom if rol == "CLIENTE" else tec_nom
+                            quien_tel = cli_tel if rol == "CLIENTE" else tec_tel
+
+                            est_cli_str = "✅ CONFIRMADA" if nuevo_conf_cli == "CONFIRMADA" else ("❌ CANCELADA" if nuevo_conf_cli == "CANCELADA" else "⏳ PENDIENTE")
+                            est_tec_str = "✅ CONFIRMADA" if nuevo_conf_tec == "CONFIRMADA" else ("❌ CANCELADA" if nuevo_conf_tec == "CANCELADA" else "⏳ PENDIENTE")
+
+                            if nuevo_estado == "CONFIRMADA":
+                                header_alert = "🎉 *CITA 100% CONFIRMADA POR AMBOS - UT TEKVO*"
+                                guia_accion = "👉 *Ambos confirmaron:* La cita está lista para ejecución. Se envió automáticamente la opción interactiva [▶️ Iniciar Labor] al técnico."
+                            elif nuevo_estado == "CANCELADA":
+                                header_alert = "🚨 *ALERTA: CITA CANCELADA POR EL CLIENTE - UT TEKVO*"
+                                guia_accion = f"👉 El cliente canceló la cita. La agenda del técnico {tec_nom} fue liberada automáticamente."
+                            elif nuevo_estado == "REQUIERE_REASIGNACION":
+                                header_alert = "🚨 *URGENTE: TÉCNICO NO DISPONIBLE - UT TEKVO*"
+                                guia_accion = f"👉 *ACCIÓN REQUERIDA:* El técnico {tec_nom} indicó no estar disponible. Reasignar técnico para este servicio de inmediato."
+                            else:
+                                header_alert = "🔔 *Confirmación Parcial de Cita - UT TEKVO*"
+                                if nuevo_conf_cli == "CONFIRMADA":
+                                    guia_accion = f"👉 *Pendiente:* Falta confirmación del técnico {tec_nom} ({tec_tel})."
+                                else:
+                                    guia_accion = f"👉 *Pendiente:* Falta confirmación del cliente {cli_nom} ({cli_tel})."
+
                             admin_alert = (
-                                f"🔔 *Actualización de Cita UT TEKVO*\n\n"
-                                f"- Cita: *{titulo}* ({fecha_fmt})\n"
-                                f"- Quien respondió: {cli_nom if rol == 'CLIENTE' else tec_nom} ({rol})\n"
-                                f"- Respuesta: {'✅ CONFIRMADO' if action == 'CONFIRMAR' else '❌ CANCELADO'}\n"
-                                f"- Estado Cita: {nuevo_estado}"
+                                f"{header_alert}\n\n"
+                                f"📋 *Datos de la Cita:*\n"
+                                f"• *ID:* `{str(cita_id)[:8]}`\n"
+                                f"• *Servicio:* *{titulo}*\n"
+                                f"• *Fecha y Hora:* *{fecha_fmt}*\n"
+                                f"• *Dirección:* {direccion}\n\n"
+                                f"👤 *Quien Respondió Ahora:*\n"
+                                f"• *Persona:* *{quien_nom}* ({rol})\n"
+                                f"• *Teléfono:* {quien_tel}\n"
+                                f"• *Respuesta:* {'✅ CONFIRMADO' if action == 'CONFIRMAR' else '❌ CANCELADO'}\n\n"
+                                f"📊 *Estado en Vivo de Ambas Partes:*\n"
+                                f"• *Cliente:* {cli_nom} ({cli_tel}) ➔ {est_cli_str}\n"
+                                f"• *Técnico:* {tec_nom} ({tec_tel}) ➔ {est_tec_str}\n"
+                                f"• *Estado General:* *{nuevo_estado}*\n\n"
+                                f"{guia_accion}"
                             )
 
                             if nuevo_estado == "CONFIRMADA":
-                                admin_alert += "\n👉 Cita 100% confirmada. Se envió opción de Inicio de Labor al técnico."
-                                # Enviar poll al técnico para iniciar labor
-                                poll_tit = (titulo[:55] + "...") if len(titulo) > 55 else titulo
-                                poll_cli = (cli_nom[:35] + "...") if len(cli_nom) > 35 else cli_nom
-                                tec_start_poll = f"🛠️ *UT TEKVO - Inicio de Labor*\n\n¿Estás listo para iniciar la labor de *{poll_tit}* con {poll_cli}?"
-                                send_waha_poll(tec_tel, tec_start_poll, ["▶️ Iniciar Labor"])
+                                poll_tit = (titulo[:45] + "...") if len(titulo) > 45 else titulo
+                                poll_cli = (cli_nom[:25] + "...") if len(cli_nom) > 25 else cli_nom
+                                poll_dir = (direccion[:35] + "...") if len(direccion) > 35 else direccion
+                                tec_start_poll = f"🛠️ *UT TEKVO - Inicio de Labor*\n\n¿Listo para iniciar *{poll_tit}* con {poll_cli}?\n📍 {poll_dir}"
+                                send_waha_poll(tec_tel, tec_start_poll, ["▶️ Iniciar Labor", "⏳ En camino"])
 
                             send_waha_text(adm_tel, admin_alert)
                             print(f"[Admin Alert Sent] to {adm_tel}: {admin_alert[:60]}...", flush=True)
