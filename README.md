@@ -191,11 +191,15 @@ El backend de `meta_bridge.py` sirve una interfaz web reactiva, intuitiva y opti
 
 ### 1. Panel de Agendamiento y Listado (`/agendar`)
 - **Agendar Cita:** Selección de cliente, técnico responsable, administrador asignado, título de labor, dirección y selector de fecha/hora con validaciones de congruencia.
+- **Gestión Autónoma de Personal Técnico:**
+  - Botón directo `➕ Registrar Técnico` para dar de alta nuevo personal con nombre y WhatsApp sin necesidad de crear una cita previa.
+  - Modal interactivo `👥 Administrar Equipo` con visualización de estado en tiempo real (`🟢 Activo` / `⚪ Inactivo`), retiro/desactivación sin pérdida de historial y reactivación instantánea en 1 clic.
 - **Buscador & Filtros:** Permite filtrar instantáneamente por texto de cliente, técnico, estado de la cita (`PENDIENTE`, `CONFIRMADA`, `CANCELADA`, `EN_PROGRESO`, `COMPLETADA`) o rango de fechas.
 - **Acciones Rápidas:**
   - Descargar invitación `.ics`.
   - Cancelar o reagendar cita.
   - Eliminar registros con confirmación modal.
+  - Purgar citas anteriores a una fecha específica con modal interactivo.
 
 ### 2. Exportación a Excel (`/agendar/exportar`)
 Descarga un archivo `.xlsx` estructurado con la totalidad de campos requeridos para reportería y métricas de desempeño técnico:

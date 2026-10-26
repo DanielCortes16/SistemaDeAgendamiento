@@ -267,22 +267,27 @@ def fetch_tecnicos_and_citas(filters=None):
     if filters is None:
         filters = {}
     tecnicos = []
+    todos_los_tecnicos = []
     citas = []
     clientes_list = []
     admin_tel = "+573118198511"
     try:
         con = get_db()
         rows_tec = con.run(
-            "SELECT id, nombre, email, telefono_whatsapp FROM usuarios "
-            "WHERE rol = 'TECNICO' AND activo = true ORDER BY nombre ASC"
+            "SELECT id, nombre, email, telefono_whatsapp, activo FROM usuarios "
+            "WHERE rol = 'TECNICO' ORDER BY activo DESC, nombre ASC"
         )
         for r in rows_tec:
-            tecnicos.append({
+            item = {
                 "id": str(r[0]),
                 "nombre": r[1],
                 "email": r[2],
                 "telefono": r[3],
-            })
+                "activo": bool(r[4]),
+            }
+            todos_los_tecnicos.append(item)
+            if r[4]:
+                tecnicos.append(item)
 
         rows_adm = con.run(
             "SELECT telefono_whatsapp FROM usuarios WHERE rol = 'ADMINISTRADOR' AND activo = true LIMIT 1"
@@ -370,7 +375,7 @@ def fetch_tecnicos_and_citas(filters=None):
         con.close()
     except Exception as e:
         print(f"[Meta Bridge DB Error] {e}")
-    return tecnicos, citas, clientes_list, admin_tel
+    return tecnicos, citas, clientes_list, admin_tel, todos_los_tecnicos
 
 
 def delete_cita_by_id(cita_id):
@@ -415,18 +420,9 @@ def delete_citas_anteriores(fecha_limite):
 def delete_tecnico_by_id(tecnico_id):
     try:
         con = get_db()
-        citas_count = con.run("SELECT COUNT(*) FROM citas WHERE tecnico_id = :id", id=tecnico_id)
-        count = citas_count[0][0] if citas_count else 0
-        if count > 0:
-            # Tiene historial de citas: desactivación lógica para preservar integridad
-            con.run("UPDATE usuarios SET activo = false WHERE id = :id", id=tecnico_id)
-            con.close()
-            return True, f"Técnico retirado del equipo (desactivado para nuevas citas porque tiene {count} servicio(s) en su historial)."
-        else:
-            # No tiene citas asociadas: eliminación física completa
-            con.run("DELETE FROM usuarios WHERE id = :id", id=tecnico_id)
-            con.close()
-            return True, "Técnico eliminado completamente del sistema."
+        con.run("UPDATE usuarios SET activo = false, updated_at = NOW() WHERE id = :id", id=tecnico_id)
+        con.close()
+        return True, "Técnico retirado del equipo (desactivado). Podrás reactivarlo en cualquier momento desde la gestión de técnicos."
     except Exception as e:
         print(f"[Meta Bridge DB Delete Tecnico Error] {e}")
         return False, str(e)
@@ -661,7 +657,7 @@ def render_whatsapp_page(status, me=None):
 def render_agendar_page(success_data=None, error_msg=None, info_msg=None, filters=None):
     if filters is None:
         filters = {}
-    tecnicos, citas, clientes_list, admin_tel = fetch_tecnicos_and_citas(filters)
+    tecnicos, citas, clientes_list, admin_tel, todos_los_tecnicos = fetch_tecnicos_and_citas(filters)
 
     # Si acabamos de agendar una cita, asegurar que esté al inicio de la tabla y destacada
     recent_mid = success_data.get("microsoft_event_id") if success_data else None
@@ -715,25 +711,43 @@ def render_agendar_page(success_data=None, error_msg=None, info_msg=None, filter
         """
 
     tec_options_html = ""
-    tec_table_rows_html = ""
     for t in tecnicos:
         val = html.escape(f"{t['nombre']}|{t['email']}")
         label = html.escape(f"{t['nombre']} ({format_phone_display(t['telefono'])})")
         tec_options_html += f'<option value="{val}">{label}</option>\n'
+    tec_options_html += '<option value="__NUEVO__">➕ Agregar nuevo técnico desde este formulario...</option>'
+
+    tec_table_rows_html = ""
+    for t in todos_los_tecnicos:
         t_nombre_escaped = html.escape(t['nombre']).replace("'", "\\'")
-        tec_table_rows_html += f"""
-        <tr>
-            <td><strong>{html.escape(t['nombre'])}</strong></td>
-            <td>{html.escape(format_phone_display(t['telefono']))}</td>
-            <td style="text-align:center;">
-                <button type="button" class="btn-del" title="Eliminar técnico"
-                        onclick="confirmDeleteTecnico('{html.escape(t['id'])}', '{t_nombre_escaped}')">
-                    🗑️
+        if t['activo']:
+            status_badge = '<span style="background:#dcfce7;color:#166534;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:700;">🟢 Activo</span>'
+            action_btn = f"""
+            <button type="button" class="btn-del" title="Retirar técnico de la lista activa"
+                    onclick="confirmDeleteTecnico('{html.escape(t['id'])}', '{t_nombre_escaped}')"
+                    style="padding:4px 8px;font-size:11px;background:#fef2f2;border:1px solid #fecaca;color:#dc2626;border-radius:6px;cursor:pointer;">
+                🗑️ Desactivar
+            </button>
+            """
+        else:
+            status_badge = '<span style="background:#f1f5f9;color:#64748b;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:700;">⚪ Inactivo</span>'
+            action_btn = f"""
+            <form method="POST" action="/agendar/tecnicos/reactivar" style="display:inline;margin:0;">
+                <input type="hidden" name="tecnico_id" value="{html.escape(t['id'])}">
+                <button type="submit" style="background:#eff6ff;border:1px solid #bfdbfe;color:#1d4ed8;padding:4px 10px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;">
+                    🔄 Reactivar
                 </button>
-            </td>
+            </form>
+            """
+        row_bg = "background:#fff;" if t['activo'] else "background:#f8fafc;color:#64748b;"
+        tec_table_rows_html += f"""
+        <tr style="{row_bg}">
+            <td style="padding:8px 10px;"><strong>{html.escape(t['nombre'])}</strong></td>
+            <td style="padding:8px 10px;">{html.escape(format_phone_display(t['telefono']))}</td>
+            <td style="text-align:center;padding:8px 10px;">{status_badge}</td>
+            <td style="text-align:center;padding:8px 10px;">{action_btn}</td>
         </tr>
         """
-    tec_options_html += '<option value="__NUEVO__">➕ Agregar nuevo técnico...</option>'
 
     tec_filter_options = '<option value="">-- Todos los técnicos --</option>\n'
     for t in tecnicos:
@@ -964,12 +978,18 @@ def render_agendar_page(success_data=None, error_msg=None, info_msg=None, filter
             </div>
 
             <div class="form-group">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-                    <label style="margin-bottom:0;">Técnico Asignado *</label>
-                    <button type="button" onclick="openTechModal()" 
-                            style="background:none;border:none;color:#2563eb;font-size:13px;font-weight:600;cursor:pointer;padding:0;text-decoration:underline;">
-                        👥 Administrar / Eliminar Técnicos
-                    </button>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:8px;">
+                    <label style="margin-bottom:0;font-weight:600;">Técnico Asignado *</label>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <button type="button" onclick="openTechModal(true)" 
+                                style="background:#2563eb;color:#fff;border:none;font-size:12px;font-weight:700;cursor:pointer;padding:5px 12px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;box-shadow:0 1px 2px rgba(0,0,0,0.05);">
+                            ➕ Registrar Técnico
+                        </button>
+                        <button type="button" onclick="openTechModal(false)" 
+                                style="background:#f1f5f9;border:1px solid #cbd5e1;color:#334155;font-size:12px;font-weight:600;cursor:pointer;padding:5px 10px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;">
+                            👥 Administrar ({len(tecnicos)})
+                        </button>
+                    </div>
                 </div>
                 <select name="tecnico_selector" id="tecnico_selector" onchange="toggleNewTech(this.value)" required>
                     {tec_options_html}
@@ -1109,30 +1129,67 @@ def render_agendar_page(success_data=None, error_msg=None, info_msg=None, filter
 
 <!-- Modal de Administración de Técnicos -->
 <div class="modal-overlay" id="techModal">
-    <div class="modal-box" style="max-width:520px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+    <div class="modal-box" style="max-width:580px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
             <h3 style="margin:0;font-size:18px;color:#0f172a;display:flex;align-items:center;gap:8px;">
-                👥 Técnicos Registrados
+                👥 Gestión de Personal Técnico
             </h3>
             <button type="button" onclick="closeTechModal()" 
                     style="background:none;border:none;font-size:20px;cursor:pointer;color:#64748b;line-height:1;">
                 ✖
             </button>
         </div>
-        <p style="font-size:13px;color:#64748b;margin-bottom:16px;">
-            Listado del personal técnico activo. Puedes eliminar técnicos que ya no formen parte de la empresa.
+        <p style="font-size:13px;color:#64748b;margin-bottom:14px;">
+            Registra nuevos técnicos para el equipo o gestiona el estado del personal existente. Los técnicos activos estarán disponibles inmediatamente para asignación de servicios.
         </p>
-        <div style="max-height:260px;overflow-y:auto;border:1px solid #e2e8f0;border-radius:10px;margin-bottom:16px;">
+
+        <!-- Formulario para Registrar Nuevo Técnico Directamente -->
+        <div style="background:#f0f9ff;border:1px solid #bae6fd;padding:14px 16px;border-radius:10px;margin-bottom:16px;">
+            <div style="font-weight:700;color:#0369a1;font-size:13px;margin-bottom:10px;display:flex;align-items:center;gap:6px;">
+                ➕ Registrar Nuevo Técnico
+            </div>
+            <form method="POST" action="/agendar/tecnicos/crear" id="crearTecForm" onsubmit="return validateCrearTecForm()">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">
+                    <div>
+                        <label style="font-size:12px;font-weight:600;color:#334155;display:block;margin-bottom:4px;">Nombre Completo *</label>
+                        <input type="text" name="nombre" id="modal_nuevo_tecnico_nombre" placeholder="Ej: Pedro Ramírez" required 
+                               style="width:100%;padding:8px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:14px;background:#fff;box-sizing:border-box;">
+                    </div>
+                    <div>
+                        <label style="font-size:12px;font-weight:600;color:#334155;display:block;margin-bottom:4px;">WhatsApp Técnico *</label>
+                        <input type="tel" name="telefono" id="modal_nuevo_tecnico_telefono" placeholder="Ej: 310 1234567" required 
+                               style="width:100%;padding:8px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:14px;background:#fff;box-sizing:border-box;"
+                               inputmode="numeric" autocomplete="tel">
+                    </div>
+                </div>
+                <div style="text-align:right;">
+                    <button type="submit" class="btn-primary" style="padding:8px 16px;font-size:13px;border-radius:6px;cursor:pointer;background:#0284c7;font-weight:600;">
+                        💾 Guardar y Activar Técnico
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <div style="font-size:13px;font-weight:700;color:#334155;">
+                Técnicos Registrados ({len(todos_los_tecnicos)}):
+            </div>
+            <div style="font-size:12px;color:#64748b;">
+                🟢 {len(tecnicos)} activo(s)
+            </div>
+        </div>
+        <div style="max-height:220px;overflow-y:auto;border:1px solid #e2e8f0;border-radius:10px;margin-bottom:16px;">
             <table style="width:100%;font-size:13px;margin:0;">
                 <thead>
-                    <tr>
+                    <tr style="background:#f8fafc;position:sticky;top:0;">
                         <th style="padding:8px 10px;">Nombre</th>
                         <th style="padding:8px 10px;">Teléfono</th>
-                        <th style="padding:8px 10px;text-align:center;width:60px;">Acción</th>
+                        <th style="padding:8px 10px;text-align:center;">Estado</th>
+                        <th style="padding:8px 10px;text-align:center;width:95px;">Acción</th>
                     </tr>
                 </thead>
                 <tbody>
-                    {tec_table_rows_html if tec_table_rows_html else '<tr><td colspan="3" style="text-align:center;padding:16px;">No hay técnicos registrados.</td></tr>'}
+                    {tec_table_rows_html if tec_table_rows_html else '<tr><td colspan="4" style="text-align:center;padding:16px;">No hay técnicos registrados.</td></tr>'}
                 </tbody>
             </table>
         </div>
@@ -1142,18 +1199,21 @@ def render_agendar_page(success_data=None, error_msg=None, info_msg=None, filter
     </div>
 </div>
 
-<!-- Modal de Confirmación para Eliminar Técnico -->
+<!-- Modal de Confirmación para Desactivar Técnico -->
 <div class="modal-overlay" id="deleteTecModal">
     <div class="modal-box">
-        <h3 class="modal-title">🗑️ Eliminar Técnico</h3>
+        <h3 class="modal-title">⏸️ Desactivar Técnico</h3>
         <p class="modal-desc" id="deleteTecModalText">
-            ¿Deseas retirar a este técnico del sistema?
+            ¿Deseas retirar a este técnico del equipo activo?
+        </p>
+        <p style="font-size:12px;color:#64748b;margin-bottom:16px;">
+            ℹ️ El técnico no aparecerá en el selector para nuevas citas, pero su historial de citas previas se conservará y podrás reactivarlo en cualquier momento.
         </p>
         <form method="POST" action="/agendar/tecnicos/eliminar" id="deleteTecForm">
             <input type="hidden" name="tecnico_id" id="deleteTecId" value="">
             <div class="modal-actions">
                 <button type="button" class="btn-modal-cancel" onclick="closeDeleteTecModal()">Cancelar</button>
-                <button type="submit" class="btn-modal-confirm">Sí, Retirar Técnico</button>
+                <button type="submit" class="btn-modal-confirm" style="background:#dc2626;">Sí, Desactivar</button>
             </div>
         </form>
     </div>
@@ -1244,8 +1304,14 @@ function closeDeleteModal() {{
     document.getElementById('deleteModal').style.display = 'none';
 }}
 
-function openTechModal() {{
+function openTechModal(focusNew) {{
     document.getElementById('techModal').style.display = 'flex';
+    if (focusNew) {{
+        setTimeout(function() {{
+            var input = document.getElementById('modal_nuevo_tecnico_nombre');
+            if (input) input.focus();
+        }}, 100);
+    }}
 }}
 
 function closeTechModal() {{
@@ -1255,12 +1321,27 @@ function closeTechModal() {{
 function confirmDeleteTecnico(tecId, nombre) {{
     document.getElementById('deleteTecId').value = tecId;
     document.getElementById('deleteTecModalText').innerHTML = 
-        '¿Deseas eliminar al técnico <strong>' + nombre + '</strong> del equipo?<br><br>Si tiene servicios en su historial, dejará de aparecer para nuevas citas manteniendo el registro histórico intacto.';
+        '¿Deseas retirar a <strong>' + nombre + '</strong> del equipo activo?';
     document.getElementById('deleteTecModal').style.display = 'flex';
 }}
 
 function closeDeleteTecModal() {{
     document.getElementById('deleteTecModal').style.display = 'none';
+}}
+
+function validateCrearTecForm() {{
+    var nom = document.getElementById('modal_nuevo_tecnico_nombre').value.trim();
+    var tel = document.getElementById('modal_nuevo_tecnico_telefono').value.trim();
+    if (!nom) {{
+        alert('Por favor ingresa el nombre del técnico.');
+        return false;
+    }}
+    var digits = tel.replace(/[^0-9]/g, '');
+    if (digits.length < 10) {{
+        alert('Por favor ingresa un número de WhatsApp válido (mínimo 10 dígitos. Ej: 310 1234567).');
+        return false;
+    }}
+    return true;
 }}
 
 // Cerrar modales con Escape o click en fondo
@@ -1339,6 +1420,7 @@ function attachPhoneFormatter(id) {{
 
 attachPhoneFormatter('cliente_telefono');
 attachPhoneFormatter('nuevo_tecnico_telefono');
+attachPhoneFormatter('modal_nuevo_tecnico_telefono');
 
 var agendarForm = document.querySelector('form[action="/agendar"]');
 if (agendarForm) {{
@@ -1459,7 +1541,7 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                 "tecnico_id": q.get("tecnico_id", [""])[0].strip(),
                 "estado": q.get("estado", [""])[0].strip(),
             }
-            _, citas_export, _, _ = fetch_tecnicos_and_citas(filters)
+            _, citas_export, _, _, _ = fetch_tecnicos_and_citas(filters)
             headers_row = [
                 "ID Cita",
                 "Servicio / Labor",
@@ -1633,6 +1715,22 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             self.handle_purgar_citas_submit()
+            return
+        if parsed.path == "/agendar/tecnicos/crear":
+            if not self.is_authenticated():
+                self.send_response(302)
+                self.send_header("Location", "/agendar")
+                self.end_headers()
+                return
+            self.handle_crear_tecnico_submit()
+            return
+        if parsed.path == "/agendar/tecnicos/reactivar":
+            if not self.is_authenticated():
+                self.send_response(302)
+                self.send_header("Location", "/agendar")
+                self.end_headers()
+                return
+            self.handle_reactivar_tecnico_submit()
             return
         if parsed.path == "/agendar/tecnicos/eliminar":
             if not self.is_authenticated():
@@ -2208,6 +2306,82 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'{"status":"error"}')
 
+    def handle_crear_tecnico_submit(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            raw_post = self.rfile.read(content_length).decode("utf-8")
+            form = urllib.parse.parse_qs(raw_post)
+            nombre = form.get("nombre", [""])[0].strip()
+            tel_raw = form.get("telefono", [""])[0].strip()
+            telefono = normalize_phone(tel_raw)
+            digits_only = "".join(c for c in telefono if c.isdigit())
+            if not nombre or len(digits_only) < 10:
+                self.send_response(302)
+                self.send_header("Location", "/agendar?error=" + urllib.parse.quote("Por favor ingresa un nombre y un teléfono de WhatsApp válido (mínimo 10 dígitos)."))
+                self.end_headers()
+                return
+
+            email = f"tec_{digits_only}@tekvo.co"
+            con = get_db()
+            existing = con.run("""
+                SELECT id, nombre FROM usuarios 
+                WHERE rol = 'TECNICO' AND (email = :e OR REGEXP_REPLACE(telefono_whatsapp, '[^0-9]', '', 'g') = :d)
+                LIMIT 1
+            """, e=email, d=digits_only)
+
+            if existing:
+                con.run("""
+                    UPDATE usuarios 
+                    SET nombre = :n, 
+                        telefono_whatsapp = :t, 
+                        email = :e, 
+                        activo = true, 
+                        updated_at = NOW()
+                    WHERE id = :id
+                """, n=nombre, t=telefono, e=email, id=existing[0][0])
+                msg = f"Técnico '{nombre}' activado exitosamente en el equipo."
+            else:
+                con.run("""
+                    INSERT INTO usuarios (nombre, email, telefono_whatsapp, rol, activo)
+                    VALUES (:n, :e, :t, 'TECNICO', true)
+                """, n=nombre, e=email, t=telefono)
+                msg = f"Técnico '{nombre}' registrado exitosamente."
+            con.close()
+
+            self.send_response(302)
+            self.send_header("Location", "/agendar?msg=" + urllib.parse.quote(msg))
+            self.end_headers()
+        except Exception as e:
+            print(f"[Crear Tecnico Error] {e}", flush=True)
+            self.send_response(302)
+            self.send_header("Location", "/agendar?error=" + urllib.parse.quote(str(e)))
+            self.end_headers()
+
+    def handle_reactivar_tecnico_submit(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            raw_post = self.rfile.read(content_length).decode("utf-8")
+            form = urllib.parse.parse_qs(raw_post)
+            tecnico_id = form.get("tecnico_id", [""])[0].strip()
+            if not tecnico_id:
+                self.send_response(302)
+                self.send_header("Location", "/agendar?error=" + urllib.parse.quote("ID de técnico inválido."))
+                self.end_headers()
+                return
+
+            con = get_db()
+            rows = con.run("UPDATE usuarios SET activo = true, updated_at = NOW() WHERE id = :id AND rol = 'TECNICO' RETURNING nombre", id=tecnico_id)
+            con.close()
+            nombre = rows[0][0] if rows else "Técnico"
+            self.send_response(302)
+            self.send_header("Location", "/agendar?msg=" + urllib.parse.quote(f"Técnico '{nombre}' reactivado exitosamente."))
+            self.end_headers()
+        except Exception as e:
+            print(f"[Reactivar Tecnico Error] {e}", flush=True)
+            self.send_response(302)
+            self.send_header("Location", "/agendar?error=" + urllib.parse.quote(str(e)))
+            self.end_headers()
+
     def handle_eliminar_tecnico_submit(self):
         try:
             content_length = int(self.headers.get("Content-Length", 0))
@@ -2325,14 +2499,29 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                 digits_only = "".join(c for c in tecnico_tel if c.isdigit())
                 tecnico_email = f"tec_{digits_only}@tekvo.co"
                 con = get_db()
-                con.run(
-                    "INSERT INTO usuarios (nombre, email, telefono_whatsapp, rol, activo) "
-                    "VALUES (:n, :e, :t, 'TECNICO', true) "
-                    "ON CONFLICT (email) DO UPDATE SET nombre = EXCLUDED.nombre, telefono_whatsapp = EXCLUDED.telefono_whatsapp",
-                    n=tecnico_nombre,
-                    e=tecnico_email,
-                    t=tecnico_tel,
-                )
+                existing = con.run("""
+                    SELECT id FROM usuarios 
+                    WHERE rol = 'TECNICO' AND (email = :e OR REGEXP_REPLACE(telefono_whatsapp, '[^0-9]', '', 'g') = :d)
+                    LIMIT 1
+                """, e=tecnico_email, d=digits_only)
+                if existing:
+                    con.run("""
+                        UPDATE usuarios 
+                        SET nombre = :n, 
+                            telefono_whatsapp = :t, 
+                            email = :e, 
+                            activo = true, 
+                            updated_at = NOW() 
+                        WHERE id = :id
+                    """, n=tecnico_nombre, t=tecnico_tel, e=tecnico_email, id=existing[0][0])
+                else:
+                    con.run(
+                        "INSERT INTO usuarios (nombre, email, telefono_whatsapp, rol, activo) "
+                        "VALUES (:n, :e, :t, 'TECNICO', true)",
+                        n=tecnico_nombre,
+                        e=tecnico_email,
+                        t=tecnico_tel,
+                    )
                 con.close()
             else:
                 parts = tecnico_selector.split("|")
