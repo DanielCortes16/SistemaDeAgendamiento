@@ -12,6 +12,7 @@ import xml.sax.saxutils
 import time
 from datetime import datetime, timedelta, timezone
 import pg8000.native
+import threading
 
 
 def generate_excel_xml(rows):
@@ -261,6 +262,109 @@ def send_waha_poll(phone, poll_name, options):
     except Exception as e:
         print(f"[WAHA Poll Error] to {phone}: {e}", flush=True)
         return False, str(e)
+
+
+def check_and_dispatch_due_start_prompts():
+    """
+    Busca citas CONFIRMADAS cuya fecha_inicio ya llegó (fecha_inicio <= NOW()),
+    que no hayan recibido el prompt de inicio (prompt_inicio_enviado = FALSE)
+    y no tengan fecha_inicio_real registrada, despachando la encuesta interactiva
+    [▶️ Iniciar Labor] al WhatsApp del técnico a la hora exacta programada.
+    """
+    try:
+        con = get_db()
+        rows = con.run("""
+            SELECT c.id, c.titulo,
+                   TO_CHAR(c.fecha_inicio AT TIME ZONE 'America/Bogota', 'YYYY-MM-DD HH24:MI') AS fecha_fmt,
+                   cli.nombre AS cli_nom, cli.telefono_whatsapp AS cli_tel,
+                   tec.nombre AS tec_nom, tec.telefono_whatsapp AS tec_tel,
+                   COALESCE(adm.telefono_whatsapp, '+573118198511') AS adm_tel,
+                   c.direccion_servicio
+            FROM citas c
+            JOIN usuarios cli ON c.cliente_id = cli.id
+            JOIN usuarios tec ON c.tecnico_id = tec.id
+            LEFT JOIN usuarios adm ON c.admin_id = adm.id
+            WHERE c.estado = 'CONFIRMADA'
+              AND c.fecha_inicio >= NOW() - INTERVAL '2 days'
+              AND c.fecha_inicio <= NOW()
+              AND c.prompt_inicio_enviado = FALSE
+              AND c.fecha_inicio_real IS NULL
+            ORDER BY c.fecha_inicio ASC
+        """)
+        con.close()
+
+        if not rows:
+            return
+
+        for r in rows:
+            cita_id, titulo, fecha_fmt, cli_nom, cli_tel, tec_nom, tec_tel, adm_tel, direccion = r
+            if not tec_tel or not any(ch.isdigit() for ch in tec_tel):
+                continue
+
+            try:
+                # Reclamar de forma atómica para prevenir envíos duplicados concurrentes
+                con_claim = get_db()
+                claimed = con_claim.run("""
+                    UPDATE citas
+                    SET prompt_inicio_enviado = TRUE,
+                        prompt_inicio_enviado_at = NOW(),
+                        updated_at = NOW()
+                    WHERE id = :id AND prompt_inicio_enviado = FALSE
+                    RETURNING id
+                """, id=cita_id)
+                con_claim.close()
+
+                if not claimed:
+                    continue
+
+                poll_tit = (titulo[:45] + "...") if len(titulo) > 45 else titulo
+                poll_cli = (cli_nom[:25] + "...") if len(cli_nom) > 25 else cli_nom
+                poll_dir = (direccion[:35] + "...") if len(direccion) > 35 else direccion
+                tec_start_poll = f"🛠️ *UT TEKVO - Inicio de Labor*\n\n¿Listo para iniciar *{poll_tit}* con {poll_cli}?\n📍 {poll_dir}"
+
+                success, _ = send_waha_poll(tec_tel, tec_start_poll, ["▶️ Iniciar Labor", "⏳ En camino"])
+                if success:
+                    admin_notice = (
+                        f"⏰ *Hora Programada de Labor - UT TEKVO*\n\n"
+                        f"La cita programada para las *{fecha_fmt}* ha alcanzado su hora de ejecución.\n\n"
+                        f"📋 *Detalles del Servicio:*\n"
+                        f"• *ID:* `{str(cita_id)[:8]}`\n"
+                        f"• *Servicio:* *{titulo}*\n"
+                        f"• *Técnico Responsable:* *{tec_nom}* ({tec_tel})\n"
+                        f"• *Cliente:* {cli_nom} ({cli_tel})\n"
+                        f"• *Dirección:* {direccion}\n\n"
+                        f"👉 Se envió automáticamente la opción interactiva [▶️ Iniciar Labor] al WhatsApp del técnico."
+                    )
+                    send_waha_text(adm_tel, admin_notice)
+                    print(f"[Start Prompt Dispatched] Cita {cita_id} enviada al técnico {tec_nom} ({tec_tel})", flush=True)
+                else:
+                    # En caso de fallo transitorio en WAHA, liberar la bandera para reintento en el siguiente ciclo
+                    con_revert = get_db()
+                    con_revert.run("""
+                        UPDATE citas
+                        SET prompt_inicio_enviado = FALSE,
+                            prompt_inicio_enviado_at = NULL,
+                            updated_at = NOW()
+                        WHERE id = :id AND fecha_inicio_real IS NULL
+                    """, id=cita_id)
+                    con_revert.close()
+                    print(f"[Start Prompt Retry] Falló envío WAHA para cita {cita_id}. Reintentando en siguiente ciclo.", flush=True)
+
+            except Exception as item_err:
+                print(f"[Start Prompt Error Item] Cita {cita_id}: {item_err}", flush=True)
+
+    except Exception as e:
+        print(f"[Start Prompt Daemon Error] {e}", flush=True)
+
+
+def start_prompt_daemon_loop():
+    print("[Start Prompt Daemon] Hilo en segundo plano iniciado (frecuencia: cada 20s)...", flush=True)
+    while True:
+        try:
+            check_and_dispatch_due_start_prompts()
+        except Exception as e:
+            print(f"[Start Prompt Daemon Loop Error] {e}", flush=True)
+        time.sleep(20)
 
 
 def fetch_tecnicos_and_citas(filters=None):
@@ -1840,6 +1944,8 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                             UPDATE citas
                             SET estado = 'EN_PROGRESO'::estado_cita_enum,
                                 fecha_inicio_real = NOW(),
+                                prompt_inicio_enviado = TRUE,
+                                prompt_inicio_enviado_at = COALESCE(prompt_inicio_enviado_at, NOW()),
                                 updated_at = NOW()
                             WHERE id = :id
                         """, id=cita_id)
@@ -1889,6 +1995,69 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                     else:
                         con.close()
                         print(f"[Labor Iniciar] No confirmed cita found for technician phone {sender_phone} (clean: {clean_p})", flush=True)
+                        send_waha_text(sender_phone, "ℹ️ No tienes servicios en estado CONFIRMADA pendientes por iniciar.")
+
+                # FLUJO 1.5: Técnico avisa que va en camino (voto poll o texto)
+                elif any(k in body_text for k in ["EN CAMINO", "⏳ EN CAMINO", "CAMINO"]):
+                    con = get_db()
+                    rows = con.run("""
+                        SELECT c.id, c.titulo,
+                               TO_CHAR(c.fecha_inicio AT TIME ZONE 'America/Bogota', 'YYYY-MM-DD HH24:MI') AS fecha_fmt,
+                               cli.nombre AS cli_nom, cli.telefono_whatsapp AS cli_tel,
+                               tec.nombre AS tec_nom, tec.telefono_whatsapp AS tec_tel,
+                               COALESCE(adm.telefono_whatsapp, '+573118198511') AS adm_tel,
+                               c.direccion_servicio
+                        FROM citas c
+                        JOIN usuarios cli ON c.cliente_id = cli.id
+                        JOIN usuarios tec ON c.tecnico_id = tec.id
+                        LEFT JOIN usuarios adm ON c.admin_id = adm.id
+                        WHERE REGEXP_REPLACE(tec.telefono_whatsapp, '[^0-9]', '', 'g') = :p
+                          AND c.estado = 'CONFIRMADA'
+                          AND c.fecha_inicio_real IS NULL
+                        ORDER BY c.fecha_inicio ASC
+                        LIMIT 1
+                    """, p=clean_p)
+                    if rows:
+                        cita_id, titulo, fecha_fmt, cli_nom, cli_tel, tec_nom, tec_tel, adm_tel, direccion = rows[0]
+                        con.close()
+
+                        # 1. Responder al técnico
+                        tec_ack = (
+                            f"🛵 ¡Recibido, {tec_nom}! Notificamos al cliente y a la administración que vas en camino hacia {direccion}.\n\n"
+                            f"Tan pronto arribes al sitio y des inicio a la labor, presiona [▶️ Iniciar Labor]."
+                        )
+                        send_waha_text(tec_tel, tec_ack)
+
+                        # 2. Re-enviar poll interactivo al técnico listo para cuando arribe
+                        poll_tit = (titulo[:45] + "...") if len(titulo) > 45 else titulo
+                        poll_cli = (cli_nom[:25] + "...") if len(cli_nom) > 25 else cli_nom
+                        poll_dir = (direccion[:35] + "...") if len(direccion) > 35 else direccion
+                        tec_start_poll = f"🛠️ *UT TEKVO - Inicio de Labor*\n\n¿Ya llegaste para iniciar *{poll_tit}* con {poll_cli}?\n📍 {poll_dir}"
+                        send_waha_poll(tec_tel, tec_start_poll, ["▶️ Iniciar Labor", "⏳ En camino"])
+
+                        # 3. Notificar al cliente (sin revelar el teléfono del técnico)
+                        cli_notice = (
+                            f"🛵 *Aviso de Servicio - UT TEKVO*\n\n"
+                            f"Hola {cli_nom}, te informamos que tu técnico asignado *{tec_nom}* ya va en camino hacia tu ubicación para atender tu servicio de *{titulo}*.\n\n"
+                            f"📞 Para cualquier duda, reporte o solicitud durante la visita, comunícate con la administración al {adm_tel}."
+                        )
+                        send_waha_text(cli_tel, cli_notice)
+
+                        # 4. Notificar al administrador
+                        adm_notice = (
+                            f"🛵 *Técnico en Camino - UT TEKVO*\n\n"
+                            f"• *ID:* `{str(cita_id)[:8]}`\n"
+                            f"• *Servicio:* *{titulo}*\n"
+                            f"• *Hora Programada:* {fecha_fmt}\n"
+                            f"• *Técnico:* {tec_nom} ({tec_tel})\n"
+                            f"• *Cliente:* {cli_nom} ({cli_tel})\n"
+                            f"• *Dirección:* {direccion}\n\n"
+                            f"👉 El técnico notificó que va en camino. El cliente ha sido avisado debidamente."
+                        )
+                        send_waha_text(adm_tel, adm_notice)
+                        print(f"[Labor En Camino] Técnico {tec_nom} en camino para cita {cita_id}", flush=True)
+                    else:
+                        con.close()
                         send_waha_text(sender_phone, "ℹ️ No tienes servicios en estado CONFIRMADA pendientes por iniciar.")
 
                 # FLUJO 2: Técnico finaliza labor (voto poll o texto)
@@ -2081,7 +2250,8 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                                    tec.nombre AS tec_nom, tec.telefono_whatsapp AS tec_tel,
                                    COALESCE(adm.telefono_whatsapp, '+573118198511') AS adm_tel,
                                    CASE WHEN REGEXP_REPLACE(cli.telefono_whatsapp, '[^0-9]', '', 'g') = :p THEN 'CLIENTE' ELSE 'TECNICO' END AS rol,
-                                   c.direccion_servicio, c.descripcion
+                                   c.direccion_servicio, c.descripcion,
+                                   (c.fecha_inicio <= NOW()) AS es_ahora
                             FROM citas c
                             JOIN usuarios cli ON c.cliente_id = cli.id
                             JOIN usuarios tec ON c.tecnico_id = tec.id
@@ -2096,7 +2266,7 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
 
                         if rows:
                             r = rows[0]
-                            cita_id, titulo, fecha_fmt, estado_actual, conf_cli, conf_tec, cli_nom, cli_tel, tec_nom, tec_tel, adm_tel, rol, direccion, descripcion = r
+                            cita_id, titulo, fecha_fmt, estado_actual, conf_cli, conf_tec, cli_nom, cli_tel, tec_nom, tec_tel, adm_tel, rol, direccion, descripcion, es_ahora = r
 
                             nuevo_estado = estado_actual
                             nuevo_conf_cli = conf_cli
@@ -2185,7 +2355,10 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
 
                             if nuevo_estado == "CONFIRMADA":
                                 header_alert = "🎉 *CITA 100% CONFIRMADA POR AMBOS - UT TEKVO*"
-                                guia_accion = "👉 *Ambos confirmaron:* La cita está lista para ejecución. Se envió automáticamente la opción interactiva [▶️ Iniciar Labor] al técnico."
+                                if es_ahora:
+                                    guia_accion = "👉 *Ambos confirmaron:* La cita está en horario de ejecución. Se envió automáticamente la opción interactiva [▶️ Iniciar Labor] al técnico."
+                                else:
+                                    guia_accion = f"👉 *Ambos confirmaron:* Cita confirmada para el {fecha_fmt}. La opción interactiva [▶️ Iniciar Labor] se enviará automáticamente al técnico a la hora programada del servicio."
                             elif nuevo_estado == "CANCELADA":
                                 header_alert = "🚨 *ALERTA: CITA CANCELADA POR EL CLIENTE - UT TEKVO*"
                                 guia_accion = f"👉 El cliente canceló la cita. La agenda del técnico {tec_nom} fue liberada automáticamente."
@@ -2218,11 +2391,23 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                             )
 
                             if nuevo_estado == "CONFIRMADA":
-                                poll_tit = (titulo[:45] + "...") if len(titulo) > 45 else titulo
-                                poll_cli = (cli_nom[:25] + "...") if len(cli_nom) > 25 else cli_nom
-                                poll_dir = (direccion[:35] + "...") if len(direccion) > 35 else direccion
-                                tec_start_poll = f"🛠️ *UT TEKVO - Inicio de Labor*\n\n¿Listo para iniciar *{poll_tit}* con {poll_cli}?\n📍 {poll_dir}"
-                                send_waha_poll(tec_tel, tec_start_poll, ["▶️ Iniciar Labor", "⏳ En camino"])
+                                if es_ahora:
+                                    poll_tit = (titulo[:45] + "...") if len(titulo) > 45 else titulo
+                                    poll_cli = (cli_nom[:25] + "...") if len(cli_nom) > 25 else cli_nom
+                                    poll_dir = (direccion[:35] + "...") if len(direccion) > 35 else direccion
+                                    tec_start_poll = f"🛠️ *UT TEKVO - Inicio de Labor*\n\n¿Listo para iniciar *{poll_tit}* con {poll_cli}?\n📍 {poll_dir}"
+                                    send_waha_poll(tec_tel, tec_start_poll, ["▶️ Iniciar Labor", "⏳ En camino"])
+                                    con_p = get_db()
+                                    con_p.run("""
+                                        UPDATE citas
+                                        SET prompt_inicio_enviado = TRUE,
+                                            prompt_inicio_enviado_at = NOW(),
+                                            updated_at = NOW()
+                                        WHERE id = :id
+                                    """, id=cita_id)
+                                    con_p.close()
+                                else:
+                                    print(f"[Cita Confirmada] Cita {cita_id} confirmada para {fecha_fmt}. La opción interactiva [▶️ Iniciar Labor] se despachará en el horario exacto programado.", flush=True)
 
                             send_waha_text(adm_tel, admin_alert)
                             print(f"[Admin Alert Sent] to {adm_tel}: {admin_alert[:60]}...", flush=True)
@@ -2708,6 +2893,8 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    daemon_thread = threading.Thread(target=start_prompt_daemon_loop, daemon=True, name="StartPromptDaemon")
+    daemon_thread.start()
     server = ThreadingHTTPServer(("0.0.0.0", 8000), MetaBridgeHandler)
     print("Meta Bridge & Portal Agendamiento escuchando en 0.0.0.0:8000")
     server.serve_forever()

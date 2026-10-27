@@ -75,6 +75,8 @@ CREATE TABLE IF NOT EXISTS citas (
     fecha_inicio_real TIMESTAMPTZ,
     fecha_fin_real TIMESTAMPTZ,
     calificacion SMALLINT CHECK (calificacion BETWEEN 1 AND 5),
+    prompt_inicio_enviado BOOLEAN NOT NULL DEFAULT FALSE,
+    prompt_inicio_enviado_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT check_rango_fechas CHECK (fecha_fin > fecha_inicio)
@@ -101,6 +103,10 @@ CREATE TABLE IF NOT EXISTS historial_notificaciones (
 -- Optimiza la consulta recurrente del Cron (Paso 3) que busca citas para recordatorio
 CREATE INDEX IF NOT EXISTS idx_citas_recordatorio_cron 
 ON citas (fecha_inicio, estado, recordatorio_24h_enviado);
+
+-- Optimiza el despacho puntual de la encuesta [Iniciar Labor] a la hora programada
+CREATE INDEX IF NOT EXISTS idx_citas_prompt_inicio
+ON citas (fecha_inicio, estado, prompt_inicio_enviado);
 
 -- Búsqueda rápida de citas por usuario
 CREATE INDEX IF NOT EXISTS idx_citas_cliente ON citas (cliente_id);
