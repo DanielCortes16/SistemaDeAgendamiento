@@ -1971,15 +1971,7 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                         fin_poll_name = f"🛠️ *UT TEKVO - Finalizar Labor*\n\nLabor en curso: *{poll_tit}* ({poll_cli}).\nPresiona al culminar:"
                         send_waha_poll(tec_tel, fin_poll_name, ["⏹️ Finalizar Labor", "⏳ Sigo trabajando"])
 
-                        # 3. Notificar al cliente
-                        cli_msg = (
-                            f"ℹ️ *Aviso UT TEKVO*\n\n"
-                            f"Hola {cli_nom}, tu técnico asignado {tec_nom} ha *iniciado* la labor técnica en tu dirección para el servicio *{titulo}* ({hora_inicio}).\n\n"
-                            f"📞 Para cualquier consulta o seguimiento durante la visita, comunícate con la administración al {adm_tel}."
-                        )
-                        send_waha_text(cli_tel, cli_msg)
-
-                        # 4. Notificar al administrador
+                        # 3. Notificar al administrador (al cliente no se le envía mensaje para evitar redundancia presencial)
                         admin_msg = (
                             f"⏳ *Labor en Progreso - UT TEKVO*\n\n"
                             f"• *ID:* `{str(cita_id)[:8]}`\n"
