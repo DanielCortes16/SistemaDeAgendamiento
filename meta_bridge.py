@@ -2136,6 +2136,34 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                         print(f"[Labor Finalizar] No in-progress cita found for technician phone {sender_phone} (clean: {clean_p})", flush=True)
                         send_waha_text(sender_phone, "ℹ️ No tienes servicios en estado EN PROGRESO pendientes por finalizar.")
 
+                # FLUJO 2.5: Técnico presiona [⏳ Sigo trabajando]
+                elif any(k in body_text for k in ["SIGO TRABAJANDO", "TRABAJANDO", "AÚN EN CURSO", "EN CURSO"]):
+                    con = get_db()
+                    rows = con.run("""
+                        SELECT c.id, c.titulo,
+                               cli.nombre AS cli_nom,
+                               tec.nombre AS tec_nom, tec.telefono_whatsapp AS tec_tel,
+                               c.direccion_servicio
+                        FROM citas c
+                        JOIN usuarios cli ON c.cliente_id = cli.id
+                        JOIN usuarios tec ON c.tecnico_id = tec.id
+                        WHERE REGEXP_REPLACE(tec.telefono_whatsapp, '[^0-9]', '', 'g') = :p
+                          AND c.estado = 'EN_PROGRESO'
+                        ORDER BY c.fecha_inicio_real DESC NULLS LAST
+                        LIMIT 1
+                    """, p=clean_p)
+                    if rows:
+                        cita_id, titulo, cli_nom, tec_nom, tec_tel, direccion = rows[0]
+                        con.close()
+                        send_waha_text(tec_tel, f"👍 ¡Entendido, {tec_nom}! El servicio *{titulo}* continúa en progreso.\n\nTan pronto termines, presiona aquí para registrar la finalización:")
+                        poll_tit = (titulo[:45] + "...") if len(titulo) > 45 else titulo
+                        poll_cli = (cli_nom[:25] + "...") if len(cli_nom) > 25 else cli_nom
+                        fin_poll_name = f"🛠️ *UT TEKVO - Finalizar Labor*\n\nLabor en curso: *{poll_tit}* ({poll_cli}).\nPresiona al culminar:"
+                        send_waha_poll(tec_tel, fin_poll_name, ["⏹️ Finalizar Labor", "⏳ Sigo trabajando"])
+                    else:
+                        con.close()
+                        send_waha_text(sender_phone, "ℹ️ No tienes servicios en estado EN PROGRESO en este momento.")
+
                 # FLUJO 3: Calificación CSAT (Estrellas, texto o números 3..5)
                 elif ("⭐" in body_text or any(k in body_text for k in ["EXCELENTE", "MUY BUENO", "REGULAR", "MUY MALO"]) or
                       ("MALO" in body_text and "MUY" not in body_text) or body_text in ["3", "4", "5"]):
