@@ -200,68 +200,86 @@ def resolve_lid_to_phone(lid):
     return None
 
 
-def send_waha_text(phone, text):
-    try:
-        clean_digits = "".join(c for c in phone if c.isdigit())
-        chat_id = f"{clean_digits}@c.us"
-        payload = {
-            "session": "default",
-            "chatId": chat_id,
-            "text": text,
-        }
-        req = urllib.request.Request(
-            f"{WAHA_BASE_URL}/api/sendText",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "X-Api-Key": WAHA_API_KEY,
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            print(f"[WAHA Text Sent] to {phone} ({chat_id}): {text[:60]}...", flush=True)
-            return True, resp.read().decode("utf-8")
-    except Exception as e:
-        print(f"[WAHA Send Error] to {phone}: {e}", flush=True)
-        return False, str(e)
+def send_waha_text(phone, text, max_retries=3):
+    clean_digits = "".join(c for c in phone if c.isdigit())
+    chat_id = f"{clean_digits}@c.us"
+    payload = {
+        "session": "default",
+        "chatId": chat_id,
+        "text": text,
+    }
+    backoff_delays = [1.0, 2.5, 5.0]
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            req = urllib.request.Request(
+                f"{WAHA_BASE_URL}/api/sendText",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Api-Key": WAHA_API_KEY,
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                print(f"[WAHA Text Sent] to {phone} ({chat_id}): {text[:60]}...", flush=True)
+                return True, resp.read().decode("utf-8")
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                delay = backoff_delays[attempt]
+                print(f"[WAHA Retry Text] Intento {attempt + 1}/{max_retries} a {phone} falló ({e}). Reintentando en {delay}s...", flush=True)
+                time.sleep(delay)
+            else:
+                print(f"[WAHA Send Error] Fallaron los {max_retries} intentos a {phone}: {e}", flush=True)
+                return False, str(last_error)
 
 
-def send_waha_poll(phone, poll_name, options):
-    try:
-        clean_digits = "".join(c for c in phone if c.isdigit())
-        chat_id = f"{clean_digits}@c.us"
-        # WhatsApp limit is 255 characters for poll title
-        if len(poll_name) > 250:
-            poll_name = poll_name[:247] + "..."
-        # WhatsApp strictly requires at least 2 options in polls
-        if not options or len(options) == 0:
-            options = ["✅ Sí", "❌ No"]
-        elif len(options) == 1:
-            options = [options[0], "⏳ Más tarde"]
-        payload = {
-            "session": "default",
-            "chatId": chat_id,
-            "poll": {
-                "name": poll_name,
-                "options": options,
-                "multipleAnswers": False
-            }
+def send_waha_poll(phone, poll_name, options, max_retries=3):
+    clean_digits = "".join(c for c in phone if c.isdigit())
+    chat_id = f"{clean_digits}@c.us"
+    # WhatsApp limit is 255 characters for poll title
+    if len(poll_name) > 250:
+        poll_name = poll_name[:247] + "..."
+    # WhatsApp strictly requires at least 2 options in polls
+    if not options or len(options) == 0:
+        options = ["✅ Sí", "❌ No"]
+    elif len(options) == 1:
+        options = [options[0], "⏳ Más tarde"]
+    payload = {
+        "session": "default",
+        "chatId": chat_id,
+        "poll": {
+            "name": poll_name,
+            "options": options,
+            "multipleAnswers": False
         }
-        req = urllib.request.Request(
-            f"{WAHA_BASE_URL}/api/sendPoll",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "X-Api-Key": WAHA_API_KEY,
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            print(f"[WAHA Poll Sent] to {phone} ({chat_id}): {poll_name[:60]}...", flush=True)
-            return True, resp.read().decode("utf-8")
-    except Exception as e:
-        print(f"[WAHA Poll Error] to {phone}: {e}", flush=True)
-        return False, str(e)
+    }
+    backoff_delays = [1.0, 2.5, 5.0]
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            req = urllib.request.Request(
+                f"{WAHA_BASE_URL}/api/sendPoll",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Api-Key": WAHA_API_KEY,
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                print(f"[WAHA Poll Sent] to {phone} ({chat_id}): {poll_name[:60]}...", flush=True)
+                return True, resp.read().decode("utf-8")
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                delay = backoff_delays[attempt]
+                print(f"[WAHA Retry Poll] Intento {attempt + 1}/{max_retries} a {phone} falló ({e}). Reintentando en {delay}s...", flush=True)
+                time.sleep(delay)
+            else:
+                print(f"[WAHA Poll Error] Fallaron los {max_retries} intentos a {phone}: {e}", flush=True)
+                return False, str(last_error)
 
 
 def check_and_dispatch_due_start_prompts():
@@ -365,6 +383,43 @@ def start_prompt_daemon_loop():
         except Exception as e:
             print(f"[Start Prompt Daemon Loop Error] {e}", flush=True)
         time.sleep(20)
+
+
+def send_waha_presence(presence="available"):
+    try:
+        payload = {"presence": presence}
+        req = urllib.request.Request(
+            f"{WAHA_BASE_URL}/api/sessions/default/presence",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Api-Key": WAHA_API_KEY},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as _:
+            return True
+    except Exception:
+        return False
+
+
+def waha_heartbeat_daemon_loop():
+    """
+    Regla de Oro 2: Heartbeat Keep-Alive en segundo plano.
+    Envía pings de estado a WAHA cada 30 segundos para mantener el socket activo
+    y ejecutar auto-recuperación si detecta desconexión.
+    """
+    print("[WAHA Heartbeat Daemon] Iniciado (revisión de presencia cada 30s)...", flush=True)
+    _cycles = 0
+    while True:
+        try:
+            status, me = get_waha_session_status()
+            _cycles += 1
+            if status == "WORKING":
+                send_waha_presence("available")
+            if _cycles % 20 == 0:  # Log de pulso cada 10 minutos (20 ciclos de 30s)
+                phone_id = me.get("id", "N/A") if isinstance(me, dict) else "N/A"
+                print(f"[WAHA Heartbeat Pulse] Sesión: default | Estado: {status} | Usuario: {phone_id}", flush=True)
+        except Exception as e:
+            print(f"[WAHA Heartbeat Error] {e}", flush=True)
+        time.sleep(30)
 
 
 def fetch_tecnicos_and_citas(filters=None):
@@ -1865,6 +1920,22 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
             event = data.get("event")
             payload = data.get("payload", {})
 
+            # Regla de Oro 4: Manejo proactivo de eventos de estado de sesión
+            if event == "session.status":
+                sess_status = payload.get("status")
+                print(f"[WAHA Event session.status] Sesión: {data.get('session')} | Estado: {sess_status}", flush=True)
+                if sess_status in ["STOPPED", "FAILED"]:
+                    print(f"[WAHA Auto-Recovery] Estado {sess_status} detectado. Disparando reinicio de sesión...", flush=True)
+                    restart_waha_session()
+                elif sess_status == "SCAN_QR_CODE":
+                    print("[WAHA Critical Alert] La sesión de WhatsApp requiere escanear código QR.", flush=True)
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status":"ok"}')
+                return
+
             sender_phone = None
             body_text = None
 
@@ -2915,6 +2986,8 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     daemon_thread = threading.Thread(target=start_prompt_daemon_loop, daemon=True, name="StartPromptDaemon")
     daemon_thread.start()
+    heartbeat_thread = threading.Thread(target=waha_heartbeat_daemon_loop, daemon=True, name="WAHAHeartbeatDaemon")
+    heartbeat_thread.start()
     server = ThreadingHTTPServer(("0.0.0.0", 8000), MetaBridgeHandler)
     print("Meta Bridge & Portal Agendamiento escuchando en 0.0.0.0:8000")
     server.serve_forever()

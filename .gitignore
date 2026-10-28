@@ -36,3 +36,5 @@ sessions/
 # Temporary files
 /tmp/
 *.bak
+backups/
+*.bak_*
