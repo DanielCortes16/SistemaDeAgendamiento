@@ -117,7 +117,6 @@ _last_restart_attempt = 0.0
 
 
 def get_waha_session_status():
-    global _last_restart_attempt
     try:
         req = urllib.request.Request(
             f"{WAHA_BASE_URL}/api/sessions/default",
@@ -127,14 +126,6 @@ def get_waha_session_status():
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             status = data.get("status", "UNKNOWN")
-
-            # Auto-recuperación si el estado quedó en FAILED o STOPPED
-            now = time.time()
-            if status in ("FAILED", "STOPPED") and (now - _last_restart_attempt > 15):
-                _last_restart_attempt = now
-                print(f"[WAHA] Estado {status} detectado. Reiniciando sesión automáticamente...")
-                restart_waha_session()
-
             return status, data.get("me", {})
     except Exception as e:
         return "DISCONNECTED", {"error": str(e)}
@@ -154,7 +145,13 @@ def get_waha_qr():
         return None
 
 
-def restart_waha_session():
+def restart_waha_session(force=False):
+    global _last_restart_attempt
+    now = time.time()
+    if not force and (now - _last_restart_attempt < 30):
+        print(f"[WAHA Restart Ignorado] Cooldown activo ({now - _last_restart_attempt:.1f}s < 30s).", flush=True)
+        return False, "Cooldown activo"
+    _last_restart_attempt = now
     try:
         req = urllib.request.Request(
             f"{WAHA_BASE_URL}/api/sessions/default/restart",
@@ -808,6 +805,9 @@ def render_whatsapp_page(status, me=None):
         }}
 
         setInterval(pollStatus, 3000);
+        if (initialStatus === "SCAN_QR_CODE") {{
+            setInterval(refreshQR, 15000);
+        }}
     </script>
 </body>
 </html>"""
@@ -1840,7 +1840,7 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                 self.send_header("Location", "/agendar")
                 self.end_headers()
                 return
-            restart_waha_session()
+            restart_waha_session(force=True)
             self.send_response(302)
             self.send_header("Location", "/agendar/whatsapp")
             self.end_headers()
@@ -1924,9 +1924,11 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
             if event == "session.status":
                 sess_status = payload.get("status")
                 print(f"[WAHA Event session.status] Sesión: {data.get('session')} | Estado: {sess_status}", flush=True)
-                if sess_status in ["STOPPED", "FAILED"]:
-                    print(f"[WAHA Auto-Recovery] Estado {sess_status} detectado. Disparando reinicio de sesión...", flush=True)
-                    restart_waha_session()
+                if sess_status == "FAILED":
+                    print(f"[WAHA Auto-Recovery] Estado FAILED detectado. Intentando reinicio con cooldown...", flush=True)
+                    restart_waha_session(force=False)
+                elif sess_status == "STOPPED":
+                    print("[WAHA Status Info] Sesión en STOPPED. No se auto-reinicia por evento para evitar loops de ciclo de vida.", flush=True)
                 elif sess_status == "SCAN_QR_CODE":
                     print("[WAHA Critical Alert] La sesión de WhatsApp requiere escanear código QR.", flush=True)
 

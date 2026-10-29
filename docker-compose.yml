@@ -97,7 +97,7 @@ services:
       - WAHA_DASHBOARD_ENABLED=True
       - WAHA_DASHBOARD_USERNAME=admin
       - WAHA_DASHBOARD_PASSWORD=citaspass
-      - WHATSAPP_DEFAULT_ENGINE=WEBJS
+      - WHATSAPP_DEFAULT_ENGINE=NOWEB
       - WHATSAPP_HOOK_URL=http://meta.citas.internal:8000/webhook/waha
       - WHATSAPP_HOOK_EVENTS=message,poll.vote,session.status
     volumes:
