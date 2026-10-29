@@ -576,9 +576,16 @@ def delete_citas_anteriores(fecha_limite):
 def delete_tecnico_by_id(tecnico_id):
     try:
         con = get_db()
-        con.run("UPDATE usuarios SET activo = false, updated_at = NOW() WHERE id = :id", id=tecnico_id)
-        con.close()
-        return True, "Técnico retirado del equipo (desactivado). Podrás reactivarlo en cualquier momento desde la gestión de técnicos."
+        citas_count = con.run("SELECT COUNT(*) FROM citas WHERE tecnico_id = :id", id=tecnico_id)
+        has_citas = citas_count[0][0] if citas_count else 0
+        if has_citas == 0:
+            con.run("DELETE FROM usuarios WHERE id = :id AND rol = 'TECNICO'", id=tecnico_id)
+            con.close()
+            return True, "Técnico eliminado completamente de la base de datos (sin citas asociadas)."
+        else:
+            con.run("UPDATE usuarios SET activo = false, updated_at = NOW() WHERE id = :id", id=tecnico_id)
+            con.close()
+            return True, f"Técnico retirado del equipo activo (conservado como inactivo por {has_citas} citas en historial)."
     except Exception as e:
         print(f"[Meta Bridge DB Delete Tecnico Error] {e}")
         return False, str(e)
@@ -1358,21 +1365,21 @@ def render_agendar_page(success_data=None, error_msg=None, info_msg=None, filter
     </div>
 </div>
 
-<!-- Modal de Confirmación para Desactivar Técnico -->
+<!-- Modal de Confirmación para Eliminar / Desactivar Técnico -->
 <div class="modal-overlay" id="deleteTecModal">
     <div class="modal-box">
-        <h3 class="modal-title">⏸️ Desactivar Técnico</h3>
+        <h3 class="modal-title">🗑️ Eliminar / Desactivar Técnico</h3>
         <p class="modal-desc" id="deleteTecModalText">
-            ¿Deseas retirar a este técnico del equipo activo?
+            ¿Deseas retirar a este técnico del equipo?
         </p>
         <p style="font-size:12px;color:#64748b;margin-bottom:16px;">
-            ℹ️ El técnico no aparecerá en el selector para nuevas citas, pero su historial de citas previas se conservará y podrás reactivarlo en cualquier momento.
+            ℹ️ Si el técnico no tiene citas registradas, se eliminará permanentemente de la base de datos. Si tiene citas históricas, se desactivará para proteger los reportes del sistema.
         </p>
         <form method="POST" action="/agendar/tecnicos/eliminar" id="deleteTecForm">
             <input type="hidden" name="tecnico_id" id="deleteTecId" value="">
             <div class="modal-actions">
                 <button type="button" class="btn-modal-cancel" onclick="closeDeleteTecModal()">Cancelar</button>
-                <button type="submit" class="btn-modal-confirm" style="background:#dc2626;">Sí, Desactivar</button>
+                <button type="submit" class="btn-modal-confirm" style="background:#dc2626;">Sí, Retirar</button>
             </div>
         </form>
     </div>
@@ -2574,30 +2581,18 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
 
             email = f"tec_{digits_only}@tekvo.co"
             con = get_db()
-            existing = con.run("""
-                SELECT id, nombre FROM usuarios 
-                WHERE rol = 'TECNICO' AND (email = :e OR REGEXP_REPLACE(telefono_whatsapp, '[^0-9]', '', 'g') = :d)
-                LIMIT 1
-            """, e=email, d=digits_only)
-
-            if existing:
-                con.run("""
-                    UPDATE usuarios 
-                    SET nombre = :n, 
-                        telefono_whatsapp = :t, 
-                        email = :e, 
-                        activo = true, 
-                        updated_at = NOW()
-                    WHERE id = :id
-                """, n=nombre, t=telefono, e=email, id=existing[0][0])
-                msg = f"Técnico '{nombre}' activado exitosamente en el equipo."
-            else:
-                con.run("""
-                    INSERT INTO usuarios (nombre, email, telefono_whatsapp, rol, activo)
-                    VALUES (:n, :e, :t, 'TECNICO', true)
-                """, n=nombre, e=email, t=telefono)
-                msg = f"Técnico '{nombre}' registrado exitosamente."
+            con.run("""
+                INSERT INTO usuarios (nombre, email, telefono_whatsapp, rol, activo, updated_at)
+                VALUES (:n, :e, :t, 'TECNICO', true, NOW())
+                ON CONFLICT (email) DO UPDATE
+                SET nombre = EXCLUDED.nombre,
+                    telefono_whatsapp = EXCLUDED.telefono_whatsapp,
+                    rol = 'TECNICO',
+                    activo = true,
+                    updated_at = NOW()
+            """, n=nombre, e=email, t=telefono)
             con.close()
+            msg = f"Técnico '{nombre}' guardado y activado exitosamente en el equipo."
 
             self.send_response(302)
             self.send_header("Location", "/agendar?msg=" + urllib.parse.quote(msg))
@@ -2750,29 +2745,16 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                 digits_only = "".join(c for c in tecnico_tel if c.isdigit())
                 tecnico_email = f"tec_{digits_only}@tekvo.co"
                 con = get_db()
-                existing = con.run("""
-                    SELECT id FROM usuarios 
-                    WHERE rol = 'TECNICO' AND (email = :e OR REGEXP_REPLACE(telefono_whatsapp, '[^0-9]', '', 'g') = :d)
-                    LIMIT 1
-                """, e=tecnico_email, d=digits_only)
-                if existing:
-                    con.run("""
-                        UPDATE usuarios 
-                        SET nombre = :n, 
-                            telefono_whatsapp = :t, 
-                            email = :e, 
-                            activo = true, 
-                            updated_at = NOW() 
-                        WHERE id = :id
-                    """, n=tecnico_nombre, t=tecnico_tel, e=tecnico_email, id=existing[0][0])
-                else:
-                    con.run(
-                        "INSERT INTO usuarios (nombre, email, telefono_whatsapp, rol, activo) "
-                        "VALUES (:n, :e, :t, 'TECNICO', true)",
-                        n=tecnico_nombre,
-                        e=tecnico_email,
-                        t=tecnico_tel,
-                    )
+                con.run("""
+                    INSERT INTO usuarios (nombre, email, telefono_whatsapp, rol, activo, updated_at)
+                    VALUES (:n, :e, :t, 'TECNICO', true, NOW())
+                    ON CONFLICT (email) DO UPDATE
+                    SET nombre = EXCLUDED.nombre,
+                        telefono_whatsapp = EXCLUDED.telefono_whatsapp,
+                        rol = 'TECNICO',
+                        activo = true,
+                        updated_at = NOW()
+                """, n=tecnico_nombre, e=tecnico_email, t=tecnico_tel)
                 con.close()
             else:
                 parts = tecnico_selector.split("|")
