@@ -1982,25 +1982,31 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
 
             elif event == "message":
                 raw_from = payload.get("from", "")
+                sender_phone = None
                 if "@lid" in raw_from:
                     sender_phone = resolve_lid_to_phone(raw_from)
                 elif "@" in raw_from:
                     from_clean = raw_from.split("@")[0]
                     sender_phone = normalize_phone(from_clean)
-                body_text = str(payload.get("body") or "").strip().upper()
-                print(f"[WAHA Inbound Message] From: {sender_phone}, Body: {body_text}", flush=True)
+                body_text = str(payload.get("body") or "").strip()
+                print(f"[WAHA Chat Libre Ignorado] De {sender_phone}: '{body_text[:50]}' (Las acciones del bot solo operan mediante encuestas interactivas)", flush=True)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status":"ok"}')
+                return
+            else:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status":"ok"}')
+                return
 
             if sender_phone and body_text:
                 clean_p = "".join(c for c in sender_phone if c.isdigit())
 
-                # FLUJO 1: Técnico inicia labor (voto poll o comando exacto)
-                is_iniciar = False
-                if is_poll_vote and ("INICIAR" in body_text or "▶️" in body_text):
-                    is_iniciar = True
-                elif not is_poll_vote and body_text in ["INICIAR LABOR", "INICIAR SERVICIO", "INICIAR"]:
-                    is_iniciar = True
-
-                if is_iniciar:
+                # FLUJO 1: Técnico inicia labor (voto en encuesta interactiva)
+                if "INICIAR" in body_text or "▶️" in body_text:
                     con = get_db()
                     rows = con.run("""
                         SELECT c.id, c.titulo,
@@ -2071,9 +2077,8 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                         if is_poll_vote:
                             send_waha_text(sender_phone, "ℹ️ No tienes servicios en estado CONFIRMADA pendientes por iniciar.")
 
-                # FLUJO 1.5: Técnico avisa que va en camino (voto poll o comando exacto)
-                elif (is_poll_vote and ("EN CAMINO" in body_text or "⏳" in body_text)) or \
-                     (not is_poll_vote and body_text in ["EN CAMINO", "VOY EN CAMINO"]):
+                # FLUJO 1.5: Técnico avisa que va en camino (voto en encuesta interactiva)
+                elif "EN CAMINO" in body_text or "⏳" in body_text:
                     con = get_db()
                     rows = con.run("""
                         SELECT c.id, c.titulo,
@@ -2133,12 +2138,10 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                         print(f"[Labor En Camino] Técnico {tec_nom} en camino para cita {cita_id}", flush=True)
                     else:
                         con.close()
-                        if is_poll_vote:
-                            send_waha_text(sender_phone, "ℹ️ No tienes servicios en estado CONFIRMADA pendientes por iniciar.")
+                        send_waha_text(sender_phone, "ℹ️ No tienes servicios en estado CONFIRMADA pendientes por iniciar.")
 
-                # FLUJO 2: Técnico finaliza labor (voto poll o comando exacto)
-                elif (is_poll_vote and ("FINALIZAR" in body_text or "⏹️" in body_text)) or \
-                     (not is_poll_vote and body_text in ["FINALIZAR LABOR", "CULMINAR LABOR", "TERMINAR LABOR", "FINALIZAR"]):
+                # FLUJO 2: Técnico finaliza labor (voto en encuesta interactiva)
+                elif "FINALIZAR" in body_text or "⏹️" in body_text:
                     con = get_db()
                     rows = con.run("""
                         SELECT c.id, c.titulo,
@@ -2219,12 +2222,10 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                     else:
                         con.close()
                         print(f"[Labor Finalizar] No in-progress cita found for technician phone {sender_phone} (clean: {clean_p})", flush=True)
-                        if is_poll_vote:
-                            send_waha_text(sender_phone, "ℹ️ No tienes servicios en estado EN PROGRESO pendientes por finalizar.")
+                        send_waha_text(sender_phone, "ℹ️ No tienes servicios en estado EN PROGRESO pendientes por finalizar.")
 
-                # FLUJO 2.5: Técnico presiona [⏳ Sigo trabajando]
-                elif (is_poll_vote and any(k in body_text for k in ["SIGO TRABAJANDO", "TRABAJANDO", "⏳"])) or \
-                     (not is_poll_vote and body_text in ["SIGO TRABAJANDO", "AUN TRABAJANDO"]):
+                # FLUJO 2.5: Técnico presiona [⏳ Sigo trabajando] (voto en encuesta interactiva)
+                elif any(k in body_text for k in ["SIGO TRABAJANDO", "TRABAJANDO", "⏳"]):
                     con = get_db()
                     rows = con.run("""
                         SELECT c.id, c.titulo,
@@ -2249,11 +2250,10 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                         send_waha_poll(tec_tel, fin_poll_name, ["⏹️ Finalizar Labor", "⏳ Sigo trabajando"])
                     else:
                         con.close()
-                        if is_poll_vote:
-                            send_waha_text(sender_phone, "ℹ️ No tienes servicios en estado EN PROGRESO en este momento.")
+                        send_waha_text(sender_phone, "ℹ️ No tienes servicios en estado EN PROGRESO en este momento.")
 
-                # FLUJO 3: Calificación CSAT (Estrellas en poll o números 1..5)
-                elif is_poll_vote and ("⭐" in body_text or any(k in body_text for k in ["EXCELENTE", "MUY BUENO", "REGULAR", "MUY MALO", "MALO"])):
+                # FLUJO 3: Calificación CSAT (voto en encuesta interactiva)
+                elif "⭐" in body_text or any(k in body_text for k in ["EXCELENTE", "MUY BUENO", "REGULAR", "MUY MALO", "MALO"]):
                     score = None
                     if "5" in body_text or "EXCELENTE" in body_text:
                         score = 5
@@ -2337,20 +2337,13 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                             if is_poll_vote:
                                 send_waha_text(sender_phone, "ℹ️ Gracias por responder. No tienes servicios completados pendientes por calificar.")
 
-                # FLUJO 4: Confirmación o Cancelación previa a la labor (o fallback CSAT para 1 o 2)
+                # FLUJO 4: Confirmación o Cancelación previa a la labor (exclusivo vía Encuesta Interactiva)
                 else:
                     action = None
-                    if is_poll_vote:
-                        if any(k in body_text for k in ["CONFIRM", "SÍ", "SI", "✅"]):
-                            action = "CONFIRMAR"
-                        elif any(k in body_text for k in ["CANCEL", "NO", "❌"]):
-                            action = "CANCELAR"
-                    else:
-                        # Para mensajes de texto libre, SOLO comandos deliberados completos (nunca substrings)
-                        if body_text in ["CONFIRMAR", "CONFIRMO", "SI CONFIRMO", "SÍ CONFIRMO", "CONFIRMAR CITA", "CONFIRMAR LABOR"]:
-                            action = "CONFIRMAR"
-                        elif body_text in ["CANCELAR CITA", "CANCELAR LABOR", "NO PUEDO ASISTIR"]:
-                            action = "CANCELAR"
+                    if any(k in body_text for k in ["CONFIRM", "SÍ", "SI", "✅"]):
+                        action = "CONFIRMAR"
+                    elif any(k in body_text for k in ["CANCEL", "NO", "❌"]):
+                        action = "CANCELAR"
 
                     if action:
                         clean_p = "".join(c for c in sender_phone if c.isdigit())
@@ -2550,73 +2543,9 @@ class MetaBridgeHandler(BaseHTTPRequestHandler):
                             print(f"[Admin Alert Sent] to {adm_tel}: {admin_alert[:60]}...", flush=True)
 
                         else:
-                            # Fallback: si envió un número de 1 a 5 por texto libre, verificar si es CSAT para cita completada
-                            if body_text in ["1", "2", "3", "4", "5"]:
-                                score = int(body_text)
-                                rows_csat = con.run("""
-                                    SELECT c.id, c.titulo,
-                                           TO_CHAR(c.fecha_inicio AT TIME ZONE 'America/Bogota', 'YYYY-MM-DD HH24:MI') AS fecha_fmt,
-                                           cli.nombre AS cli_nom, cli.telefono_whatsapp AS cli_tel,
-                                           tec.nombre AS tec_nom, tec.telefono_whatsapp AS tec_tel,
-                                           COALESCE(adm.telefono_whatsapp, '+573118198511') AS adm_tel,
-                                           c.direccion_servicio
-                                    FROM citas c
-                                    JOIN usuarios cli ON c.cliente_id = cli.id
-                                    JOIN usuarios tec ON c.tecnico_id = tec.id
-                                    LEFT JOIN usuarios adm ON c.admin_id = adm.id
-                                    WHERE REGEXP_REPLACE(cli.telefono_whatsapp, '[^0-9]', '', 'g') = :p
-                                      AND c.estado = 'COMPLETADA'
-                                      AND c.calificacion IS NULL
-                                    ORDER BY c.fecha_fin_real DESC NULLS LAST, c.updated_at DESC
-                                    LIMIT 1
-                                """, p=clean_p)
-                                if rows_csat:
-                                    cita_id, titulo, fecha_fmt, cli_nom, cli_tel, tec_nom, tec_tel, adm_tel, direccion = rows_csat[0]
-                                    con.run("UPDATE citas SET calificacion = :score, updated_at = NOW() WHERE id = :id", score=score, id=cita_id)
-                                    con.close()
-                                    send_waha_text(
-                                        cli_tel,
-                                        f"🙌 ¡Muchas gracias por tu calificación de {score}/5 ⭐!\n"
-                                        f"En UT TEKVO valoramos tu opinión para seguir brindando el mejor servicio.\n\n"
-                                        f"📞 Para nuevos requerimientos o soporte, comunícate con nuestra administración al {adm_tel}."
-                                    )
-                                    send_waha_text(tec_tel, f"⭐ *Calificación de Cliente - UT TEKVO*\n\nEl cliente {cli_nom} ha calificado tu servicio en *{titulo}* con *{score}/5 ⭐*.")
-                                    
-                                    stars_bar = "⭐" * score
-                                    if score <= 2:
-                                        header_csat = "🚨 *ALERTA CSAT BAJO (Calificación Negativa) - UT TEKVO*"
-                                        guia_csat = "👉 *Atención Inmediata:* Se sugiere contactar al cliente de inmediato para seguimiento y atención de garantía / calidad."
-                                    elif score == 3:
-                                        header_csat = "⚠️ *Calificación Regular Recibida - UT TEKVO*"
-                                        guia_csat = "👉 Se recomienda revisar posibles oportunidades de mejora en el servicio con el técnico."
-                                    else:
-                                        header_csat = "⭐ *Nueva Calificación Positiva Recibida - UT TEKVO*"
-                                        guia_csat = "👉 ¡Cliente satisfecho con la atención técnica brindada!"
-
-                                    adm_alert = (
-                                        f"{header_csat}\n\n"
-                                        f"📋 *Datos del Servicio:*\n"
-                                        f"• *ID:* `{str(cita_id)[:8]}`\n"
-                                        f"• *Servicio:* *{titulo}*\n"
-                                        f"• *Fecha:* {fecha_fmt}\n"
-                                        f"• *Dirección:* {direccion}\n\n"
-                                        f"👤 *Cliente Calificador:*\n"
-                                        f"• *Nombre:* *{cli_nom}*\n"
-                                        f"• *Teléfono:* {cli_tel}\n\n"
-                                        f"🔧 *Técnico Responsable:*\n"
-                                        f"• *Nombre:* *{tec_nom}*\n"
-                                        f"• *Teléfono:* {tec_tel}\n\n"
-                                        f"⭐ *Puntuación Otorgada:* {stars_bar} *({score}/5)*\n\n"
-                                        f"{guia_csat}"
-                                    )
-                                    send_waha_text(adm_tel, adm_alert)
-                                    print(f"[CSAT Fallback Registrado] Cita {cita_id} calificada con {score}/5 por {cli_nom}", flush=True)
-                                else:
-                                    con.close()
-                                    print(f"[WAHA Inbound] No pending cita or unrated completed cita found for phone {sender_phone}", flush=True)
-                            else:
-                                con.close()
-                                print(f"[WAHA Inbound] No pending cita found for phone {sender_phone} (clean: {clean_p})", flush=True)
+                            con.close()
+                            print(f"[WAHA Poll Vote] No pending cita found for phone {sender_phone} (clean: {clean_p})", flush=True)
+                            send_waha_text(sender_phone, "ℹ️ No se encontró ninguna cita futura pendiente de confirmación asociada a este voto.")
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
